@@ -1,0 +1,1 @@
+"""AI College backend application."""
