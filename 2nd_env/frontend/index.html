@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI College Local</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Offline-first local intelligence</p>
+          <h1>AI College Local</h1>
+          <p class="lede">A controlled local agent, Ollama-backed reasoning, and simulated demo tools for the first foundation chunk.</p>
+        </div>
+        <div class="status-card" id="status-card">
+          <span class="badge">Backend</span>
+          <strong>Checking status...</strong>
+          <p>Waiting for the local API.</p>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel assistant">
+          <h2>Assistant</h2>
+          <div id="messages" class="messages"></div>
+          <form id="chat-form" class="chat-form">
+            <input id="chat-input" type="text" placeholder="Ask for system status, list rooms, or room status..." autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </article>
+
+        <article class="panel tools">
+          <h2>Demo Tools</h2>
+          <ul>
+            <li>system_status</li>
+            <li>list_rooms</li>
+            <li>get_room_status</li>
+          </ul>
+          <div class="quick-actions">
+            <button data-message="system status">System status</button>
+            <button data-message="list rooms">List rooms</button>
+            <button data-message="status of AI Lab">AI Lab status</button>
+          </div>
+        </article>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
