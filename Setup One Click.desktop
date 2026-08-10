@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Setup One Click
+Comment=Run the AI College one-click setup script
+Exec=gnome-terminal -- bash -c '/home/ali/.local/bin/setup_one_click; exec bash'
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
