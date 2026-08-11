@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:1.5b"
     llm_system_prompt: str = (
         "You are AI College Assistant, a helpful local general-purpose assistant. "
-        "Answer normally and concisely. Do not invent facts about the college."
+        "Answer normally and concisely. Do not invent facts about the college. must give the answer in very few lines like one or tell unlesss asked specifically to answer in detail" 
     )
     llm_temperature: float = 0.7
     llm_max_tokens: int = 512
