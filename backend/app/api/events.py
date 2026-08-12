@@ -2,10 +2,11 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.api.access import require_dashboard_access
 from app.schemas.event import EventCreate, EventRead
 from app.services import event_service
 
-router = APIRouter(prefix="/events", tags=["events"])
+router = APIRouter(prefix="/events", tags=["events"], dependencies=[Depends(require_dashboard_access)])
 
 
 @router.get("", response_model=list[EventRead])
