@@ -6,17 +6,18 @@ from app.main import app
 from app.services.ai_service import AIService
 from app.services.llm.base import LLMProvider, ProviderStatus
 from app.services.llm.ollama_provider import OllamaProvider
+from app.services.speech import SpeechService
 
 
 class FakeProvider(LLMProvider):
     name = "ollama"
     model = "test-model"
 
-    async def generate(self, message: str, system_prompt: str) -> str:
+    async def generate(self, message: str, system_prompt: str, images: list[str] | None = None) -> str:
         return f"Local answer: {message}"
 
     async def health_check(self) -> ProviderStatus:
-        return ProviderStatus(runtime="available", model_available=True, status="online")
+        return ProviderStatus(runtime="available", model_available=True, status="online", supports_image_input=True, supports_voice_input=True, supports_voice_output=True)
 
 
 @pytest.fixture
@@ -32,12 +33,15 @@ def mock_ai(fake_ai_service):
 
 
 @pytest.mark.anyio
-async def test_ai_status_endpoint(client, mock_ai):
+async def test_ai_status_endpoint(client, mock_ai, monkeypatch):
+    monkeypatch.setattr(SpeechService, "supports_transcription", lambda settings=None: False)
+    monkeypatch.setattr(SpeechService, "supports_text_to_speech", lambda: True)
     response = await client.get("/api/ai/status")
     assert response.status_code == 200
     assert response.json() == {
         "provider": "ollama", "model": "test-model", "runtime": "available",
-        "model_available": True, "status": "online",
+        "model_available": True, "status": "online", "supports_image_input": True, "supports_voice_input": False, "supports_voice_output": True,
+        "voice_input_engine": "unavailable", "voice_output_engine": "espeak-ng",
     }
 
 

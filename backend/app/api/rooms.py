@@ -2,10 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.api.access import require_dashboard_access
 from app.schemas.room import RoomCreate, RoomDetail, RoomRead, RoomUpdate
 from app.services import room_service
 
-router = APIRouter(prefix="/rooms", tags=["rooms"])
+router = APIRouter(prefix="/rooms", tags=["rooms"], dependencies=[Depends(require_dashboard_access)])
 
 
 @router.get("", response_model=list[RoomDetail])

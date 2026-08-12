@@ -2,10 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.api.access import require_dashboard_access
 from app.schemas.device import DeviceCreate, DeviceRead, DeviceUpdate
 from app.services import device_service
 
-router = APIRouter(prefix="/devices", tags=["devices"])
+router = APIRouter(prefix="/devices", tags=["devices"], dependencies=[Depends(require_dashboard_access)])
 
 
 @router.get("", response_model=list[DeviceRead])

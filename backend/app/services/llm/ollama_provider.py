@@ -18,6 +18,11 @@ class OllamaProvider(LLMProvider):
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
 
+    @staticmethod
+    def _supports_image_input(model_name: str) -> bool:
+        lowered = model_name.lower()
+        return any(keyword in lowered for keyword in ("vision", "llava", "bakllava", "moondream", "gemma3"))
+
     async def health_check(self) -> ProviderStatus:
         try:
             async with httpx.AsyncClient(timeout=min(self.timeout, 10.0)) as client:
@@ -33,19 +38,28 @@ class OllamaProvider(LLMProvider):
             runtime="available",
             model_available=available,
             status="online" if available else "error",
+            supports_image_input=self._supports_image_input(self.model),
+            supports_voice_input=False,
+            supports_voice_output=True,
         )
 
-    async def generate(self, message: str, system_prompt: str) -> str:
+    async def generate(self, message: str, system_prompt: str, images: list[str] | None = None) -> str:
+        user_message = {"role": "user", "content": message}
+        if images:
+            user_message["images"] = images
+
         payload = {
             "model": self.model,
-            "prompt": message,
-            "system": system_prompt,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                user_message,
+            ],
             "stream": False,
             "options": {"temperature": self.temperature, "num_predict": self.max_tokens},
         }
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(f"{self.base_url}/api/generate", json=payload)
+                response = await client.post(f"{self.base_url}/api/chat", json=payload)
                 response.raise_for_status()
                 data = response.json()
         except httpx.ConnectError as exc:
@@ -61,7 +75,7 @@ class OllamaProvider(LLMProvider):
             logger.exception("Unexpected Ollama provider failure")
             raise LLMProviderError("Local AI engine is unavailable.") from exc
 
-        text = data.get("response")
+        text = data.get("message", {}).get("content") or data.get("response")
         if not isinstance(text, str) or not text.strip():
             logger.warning("Ollama returned an empty response for model %s", self.model)
             raise LLMProviderError("Local AI model returned an empty response.")

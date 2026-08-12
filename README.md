@@ -1,55 +1,27 @@
-<<<<<<< HEAD
-This repo will have all the files to automate and integrate ai in college
-=======
 # AI College
 
-AI College is a centralized, locally hosted intelligent college infrastructure. It includes a working dashboard, SQLite-backed foundation, and a fully local AI integration through Ollama.
+AI College is a locally hosted assistant project. The only working user-facing feature for now is the local AI assistant, served on a separate public address, with a private dashboard gate on the other address.
 
-## Current
+## What works now
 
-- FastAPI, SQLAlchemy, SQLite, CORS, environment configuration, logging, and Swagger docs.
-- Demo seed data: six rooms, eleven simulated devices, and activity events.
-- React + TypeScript dashboard that loads all displayed data from the live backend API.
-- CRUD API for rooms and devices; read/create API for events.
-- A provider-based AI service that talks to a local Ollama model only; no cloud AI API is used.
-- AI Assistant chat UI with live local-runtime status and graceful offline handling.
-- Pytest coverage for AI status, validation, provider offline behavior, and mocked chat behavior.
+- Local Ollama-backed chat
+- Separate public assistant address and private dashboard gate
+- Typed input
+- Human-like local spoken replies through `piper` when configured, with `espeak-ng` fallback
+- Optional image attachments for vision-capable models
 
-Demo infrastructure records are explicitly simulation data. The AI assistant is a general-purpose local assistant and does not claim unprovided college facts.
+## Addresses
 
-## Future
+- Public assistant: `http://localhost:5174`
+- Dashboard gate: `http://localhost:5173`
 
-College RAG, vision, people counting, IoT adapters, Kudos, authentication, and centralized administration will be developed later.
+## Setup
 
-## Architecture
-
-`React frontend → FastAPI → application services → SQLAlchemy → SQLite`
-
-`React frontend → FastAPI → AI Service → LLM Provider → Ollama → local model`
-
-See [architecture.md](docs/architecture.md).
-
-## Local AI setup
-
-The development default is `qwen2.5:1.5b`, a lightweight ~1.5B-parameter instruct model suitable for a CPU laptop with 16 GB RAM. It is a development model only; deploy a stronger local model on the college server by changing environment variables, without application code changes.
-
-1. Install Ollama with the official Linux instructions at [ollama.com/download/linux](https://ollama.com/download/linux). The usual command is `curl -fsSL https://ollama.com/install.sh | sh`.
-2. Check the runtime: `ollama --version` and `ollama list`.
-3. Pull the development model: `ollama pull qwen2.5:1.5b`.
-4. Start the runtime if it is not already managed by your system: `ollama serve`.
-5. Copy `.env.example` to `.env` and set `LLM_PROVIDER`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, and `LLM_TIMEOUT` as appropriate.
-
-The backend never downloads models and never forwards prompts to any cloud service. Ollama owns local model downloads and execution.
-
-## Run
-
-Optionally copy configuration:
-
-```bash
-cp .env.example .env
-```
-
-Backend (from the project root):
+1. Copy `.env.example` to `.env`.
+2. Set `DASHBOARD_ACCESS_KEY` only if you want to protect the dashboard address.
+3. For local voice input, set `WHISPER_CPP_BIN` to your whisper.cpp CLI binary and `WHISPER_CPP_MODEL` to a local Whisper model file.
+4. For local voice replies, set `PIPER_TTS_BIN` to your Piper binary and `PIPER_TTS_MODEL` to a local voice `.onnx` file. Set `PIPER_TTS_CONFIG` if the model needs an explicit JSON config.
+5. Run the backend from the project root:
 
 ```bash
 .venv/bin/pip install -r backend/requirements.txt
@@ -57,36 +29,35 @@ cd backend
 ../.venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
-Database initialization is automatic. API docs: http://localhost:8000/docs
-
-Frontend (new terminal):
+4. Run the assistant frontend:
 
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev:assistant
 ```
 
-Open http://localhost:5173. The default API target is `http://localhost:8000/api`; set `VITE_API_URL` to override it.
-
-Open **AI Assistant** in the sidebar. The status indicator will show LOCAL AI ONLINE only when both Ollama and the configured model are available.
-
-## Tests
+5. If you want the dashboard gate, run:
 
 ```bash
-cd backend
-../.venv/bin/python -m pytest
+cd frontend
+npm run dev:dashboard
 ```
 
-Tests cover health, database initialization, core APIs, AI status, empty-message rejection, mocked chat success, and unavailable Ollama runtime handling. They do not require a running local model.
+## Voice flow
+
+- Voice input uses whisper.cpp locally when `WHISPER_CPP_BIN` and `WHISPER_CPP_MODEL` are set.
+- Replies use Piper locally when `PIPER_TTS_BIN` and `PIPER_TTS_MODEL` are set.
+- `espeak-ng` is only a fallback for machines that do not have Piper configured.
+- If the local speech engine is missing, the UI disables the button instead of failing.
+
+## Image flow
+
+- Attach an image from the composer.
+- If the selected model supports vision, the image goes to the model.
+- If not, the UI blocks submission and tells you why.
 
 ## API
 
-- `GET /api/health`
-- `GET /api/system/status`
 - `GET /api/ai/status`
-- `POST /api/ai/chat` with `{ "message": "..." }`
-- CRUD `/api/rooms`
-- CRUD `/api/devices`
-- `GET` and `POST /api/events` (filters: `limit`, `location`, `event_type`)
->>>>>>> ec5e480 (llm version 2)
+- `POST /api/ai/chat`
