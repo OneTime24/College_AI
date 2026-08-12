@@ -18,11 +18,6 @@ class OllamaProvider(LLMProvider):
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
 
-    @staticmethod
-    def _supports_image_input(model_name: str) -> bool:
-        lowered = model_name.lower()
-        return any(keyword in lowered for keyword in ("vision", "llava", "bakllava", "moondream", "gemma3"))
-
     async def health_check(self) -> ProviderStatus:
         try:
             async with httpx.AsyncClient(timeout=min(self.timeout, 10.0)) as client:
@@ -38,21 +33,14 @@ class OllamaProvider(LLMProvider):
             runtime="available",
             model_available=available,
             status="online" if available else "error",
-            supports_image_input=self._supports_image_input(self.model),
-            supports_voice_input=False,
-            supports_voice_output=True,
         )
 
-    async def generate(self, message: str, system_prompt: str, images: list[str] | None = None) -> str:
-        user_message = {"role": "user", "content": message}
-        if images:
-            user_message["images"] = images
-
+    async def generate(self, message: str, system_prompt: str) -> str:
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                user_message,
+                {"role": "user", "content": message},
             ],
             "stream": False,
             "options": {"temperature": self.temperature, "num_predict": self.max_tokens},
