@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    app_name: str = "AI College"
+    app_name: str = "hazrat"
     app_version: str = "0.1.0"
     debug: bool = True
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:1.5b"
     llm_system_prompt: str = (
         "You are AI College Assistant, a helpful local general-purpose assistant. "
-        "Answer normally and concisely. Do not invent facts about the college. must give the answer in very few lines like one or tell unlesss asked specifically to answer in detail" 
+        "Answer normally and concisely. Do not invent facts about the college. must give the answer in very few lines like one or tell unlesss asked specifically to answer in detail. Always answer concisely and fast" 
     )
     llm_temperature: float = 0.7
     llm_max_tokens: int = 512
