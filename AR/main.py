@@ -1,962 +1,852 @@
 import cv2
+import mediapipe as mp
+import numpy as np
 import random
 import time
 import math
-import numpy as np
 
-
-WINDOW_NAME = "AI COLLEGE | OFFLINE AR"
+MODEL_PATH = "models/face_landmarker.task"
 
 CAMERA_INDEX = 0
+WIDTH = 640
+HEIGHT = 480
 
-MIN_FACE_WIDTH = 170
-RESET_DELAY = 1.2
+MIN_FACE_WIDTH = 115
+LOST_FACE_TIMEOUT = 1.0
 
-FACE_CASCADE = cv2.data.haarcascades + \
-    "haarcascade_frontalface_default.xml"
+WINDOW_NAME = "AI COLLEGE - OFFLINE AR"
+
+mp_vision = mp.tasks.vision
+
+BaseOptions = mp.tasks.BaseOptions
+FaceLandmarker = mp_vision.FaceLandmarker
+FaceLandmarkerOptions = mp_vision.FaceLandmarkerOptions
+RunningMode = mp_vision.RunningMode
 
 
 # ============================================================
-# DRAWING HELPERS
+# UTILITIES
 # ============================================================
+
+def p(landmarks, index, w, h):
+    lm = landmarks[index]
+    return np.array(
+        [lm.x * w, lm.y * h],
+        dtype=np.float32
+    )
+
+
+def dist(a, b):
+    return float(np.linalg.norm(a - b))
+
+
+def midpoint(a, b):
+    return (a + b) / 2.0
+
 
 def ellipse(frame, center, axes, color, thickness=-1):
     cv2.ellipse(
         frame,
-        center,
-        axes,
+        tuple(np.int32(center)),
+        tuple(np.int32(axes)),
         0,
         0,
         360,
         color,
-        thickness
+        thickness,
+        cv2.LINE_AA
     )
 
 
-def polygon(frame, points, color):
-    pts = np.array(points, dtype=np.int32)
-    cv2.fillPoly(frame, [pts], color)
-
-
-def text_center(frame, text, y, scale=0.7, thickness=2):
-    size = cv2.getTextSize(
-        text,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        thickness
-    )[0]
-
-    x = (frame.shape[1] - size[0]) // 2
-
-    cv2.putText(
+def line(frame, a, b, color, thickness=2):
+    cv2.line(
         frame,
-        text,
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        (255, 255, 255),
+        tuple(np.int32(a)),
+        tuple(np.int32(b)),
+        color,
         thickness,
         cv2.LINE_AA
     )
 
 
 # ============================================================
-# SUNGLASSES
+# SMOOTHING
 # ============================================================
 
-def filter_sunglasses(frame, x, y, w, h):
+class FaceSmoother:
 
-    ey = y + int(h * 0.40)
+    def __init__(self, alpha=0.45):
+        self.alpha = alpha
+        self.previous = None
 
-    left = (
-        x + int(w * 0.32),
-        ey
+    def update(self, points):
+
+        if self.previous is None:
+            self.previous = points.copy()
+            return points
+
+        self.previous = (
+            self.previous * (1.0 - self.alpha)
+            + points * self.alpha
+        )
+
+        return self.previous
+
+    def reset(self):
+        self.previous = None
+
+
+# ============================================================
+# FACE INFORMATION
+# ============================================================
+
+def get_face_info(landmarks, w, h):
+
+    left = p(landmarks, 234, w, h)
+    right = p(landmarks, 454, w, h)
+
+    face_width = dist(left, right)
+
+    left_eye_outer = p(landmarks, 33, w, h)
+    left_eye_inner = p(landmarks, 133, w, h)
+
+    right_eye_inner = p(landmarks, 362, w, h)
+    right_eye_outer = p(landmarks, 263, w, h)
+
+    left_eye = midpoint(
+        left_eye_outer,
+        left_eye_inner
     )
 
-    right = (
-        x + int(w * 0.68),
-        ey
+    right_eye = midpoint(
+        right_eye_outer,
+        right_eye_inner
     )
 
-    r = max(15, int(w * 0.14))
+    nose = p(landmarks, 1, w, h)
+
+    mouth_left = p(landmarks, 61, w, h)
+    mouth_right = p(landmarks, 291, w, h)
+
+    mouth = midpoint(
+        mouth_left,
+        mouth_right
+    )
+
+    chin = p(landmarks, 152, w, h)
+
+    forehead = p(landmarks, 10, w, h)
+
+    return {
+        "width": face_width,
+        "left_eye": left_eye,
+        "right_eye": right_eye,
+        "left_eye_width": dist(
+            left_eye_outer,
+            left_eye_inner
+        ),
+        "right_eye_width": dist(
+            right_eye_outer,
+            right_eye_inner
+        ),
+        "nose": nose,
+        "mouth": mouth,
+        "mouth_width": dist(
+            mouth_left,
+            mouth_right
+        ),
+        "chin": chin,
+        "forehead": forehead,
+        "left": left,
+        "right": right,
+    }
+
+
+# ============================================================
+# FACE DISTORTION
+# ============================================================
+
+def remap_face(
+    frame,
+    center,
+    radius_x,
+    radius_y,
+    scale_x,
+    scale_y
+):
+
+    h, w = frame.shape[:2]
+
+    x0 = max(0, int(center[0] - radius_x))
+    x1 = min(w, int(center[0] + radius_x))
+
+    y0 = max(0, int(center[1] - radius_y))
+    y1 = min(h, int(center[1] + radius_y))
+
+    if x1 <= x0 or y1 <= y0:
+        return frame
+
+    roi = frame[y0:y1, x0:x1]
+
+    rh, rw = roi.shape[:2]
+
+    if rw < 5 or rh < 5:
+        return frame
+
+    yy, xx = np.mgrid[0:rh, 0:rw].astype(np.float32)
+
+    cx = rw / 2.0
+    cy = rh / 2.0
+
+    nx = (xx - cx) / max(cx, 1)
+    ny = (yy - cy) / max(cy, 1)
+
+    sx = 1.0 / max(scale_x, 0.05)
+    sy = 1.0 / max(scale_y, 0.05)
+
+    map_x = cx + nx * cx * sx
+    map_y = cy + ny * cy * sy
+
+    map_x = np.clip(map_x, 0, rw - 1)
+    map_y = np.clip(map_y, 0, rh - 1)
+
+    warped = cv2.remap(
+        roi,
+        map_x,
+        map_y,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT
+    )
+
+    mask = np.zeros(
+        (rh, rw),
+        dtype=np.uint8
+    )
 
     cv2.ellipse(
-        frame,
-        left,
-        (r, int(r * 0.65)),
+        mask,
+        (int(cx), int(cy)),
+        (
+            int(rw * 0.48),
+            int(rh * 0.48)
+        ),
         0,
         0,
         360,
-        (10, 10, 10),
-        -1
+        255,
+        -1,
+        cv2.LINE_AA
     )
 
-    cv2.ellipse(
+    mask = cv2.GaussianBlur(
+        mask,
+        (21, 21),
+        0
+    )
+
+    alpha = (
+        mask.astype(np.float32)
+        / 255.0
+    )[:, :, None]
+
+    result = (
+        warped.astype(np.float32) * alpha
+        + roi.astype(np.float32) * (1 - alpha)
+    )
+
+    frame[y0:y1, x0:x1] = result.astype(
+        np.uint8
+    )
+
+    return frame
+
+
+# ============================================================
+# FILTER 1 - ALIEN
+# ============================================================
+
+def alien_filter(frame, f):
+
+    width = f["width"]
+
+    # Face deformation
+    frame = remap_face(
         frame,
-        right,
-        (r, int(r * 0.65)),
-        0,
-        0,
-        360,
-        (10, 10, 10),
-        -1
+        midpoint(f["forehead"], f["chin"]),
+        width * 0.72,
+        width * 0.90,
+        0.78,
+        1.12
     )
 
-    cv2.line(
+    # Eyes
+    for eye in (
+        f["left_eye"],
+        f["right_eye"]
+    ):
+
+        size = width * 0.17
+
+        ellipse(
+            frame,
+            eye,
+            (size, size * 1.25),
+            (12, 8, 15)
+        )
+
+        ellipse(
+            frame,
+            eye,
+            (size * .65, size * .90),
+            (70, 220, 255)
+        )
+
+        ellipse(
+            frame,
+            eye,
+            (size * .20, size * .75),
+            (5, 5, 10)
+        )
+
+        ellipse(
+            frame,
+            eye - np.array(
+                [size * .20, size * .25]
+            ),
+            (size * .10, size * .10),
+            (255, 255, 255)
+        )
+
+    # Alien mouth
+    ellipse(
         frame,
-        (left[0] + r, ey),
-        (right[0] - r, ey),
-        (10, 10, 10),
-        max(5, int(w * 0.025))
+        f["mouth"],
+        (
+            f["mouth_width"] * .42,
+            width * .025
+        ),
+        (20, 5, 25)
     )
 
-    cv2.line(
-        frame,
-        (x, ey - 3),
-        (left[0] - r, ey),
-        (10, 10, 10),
-        5
+    return frame
+
+
+# ============================================================
+# FILTER 2 - DOG
+# ============================================================
+
+def dog_filter(frame, f):
+
+    width = f["width"]
+
+    # Ears
+    left = f["left"] + np.array(
+        [-width * .15, -width * .40]
     )
 
-    cv2.line(
-        frame,
-        (right[0] + r, ey),
-        (x + w, ey - 3),
-        (10, 10, 10),
-        5
+    right = f["right"] + np.array(
+        [width * .15, -width * .40]
     )
 
-def filter_moustache(frame, x, y, w, h):
+    for ear in (left, right):
 
-    cx = x + w // 2
-    cy = y + int(h * 0.64)
+        pts = np.array([
+            ear + [-width * .18, -width * .05],
+            ear + [width * .18, -width * .05],
+            ear + [0, width * .35]
+        ], dtype=np.int32)
 
-    size = max(12, int(w * 0.10))
+        cv2.fillPoly(
+            frame,
+            [pts],
+            (65, 45, 30)
+        )
 
-    for side in (-1, 1):
+        inner = pts.astype(
+            np.float32
+        )
 
-        points = []
-
-        for i in range(20):
-
-            t = i / 19
-
-            px = int(
-                cx
-                + side * (
-                    size
-                    + t * size * 2
-                )
-            )
-
-            py = int(
-                cy
-                + math.sin(t * math.pi)
-                * size * .65
-            )
-
-            points.append(
-                (px, py)
-            )
+        inner[:, 1] += width * .04
 
         cv2.polylines(
             frame,
-            [np.array(points)],
-            False,
-            (25, 25, 25),
-            max(5, size // 2)
+            [inner.astype(np.int32)],
+            True,
+            (110, 70, 50),
+            4,
+            cv2.LINE_AA
         )
 
-# ============================================================
-# BIG EYES
-# ============================================================
-
-def filter_big_eyes(frame, x, y, w, h):
-
-    ey = y + int(h * 0.40)
-
-    r = max(
-        18,
-        int(w * 0.13)
-    )
-
-    left = (
-        x + int(w * 0.32),
-        ey
-    )
-
-    right = (
-        x + int(w * 0.68),
-        ey
-    )
-
-    # White eyes
-
-    cv2.circle(
-        frame,
-        left,
-        r,
-        (245, 245, 245),
-        -1
-    )
-
-    cv2.circle(
-        frame,
-        right,
-        r,
-        (245, 245, 245),
-        -1
-    )
-
-    # Pupils
-
-    pupil = max(5, r // 3)
-
-    cv2.circle(
-        frame,
-        left,
-        pupil,
-        (20, 20, 20),
-        -1
-    )
-
-    cv2.circle(
-        frame,
-        right,
-        pupil,
-        (20, 20, 20),
-        -1
-    )
-
-    # Highlights
-
-    cv2.circle(
-        frame,
-        (
-            left[0] - pupil // 3,
-            left[1] - pupil // 3
-        ),
-        max(2, pupil // 3),
-        (255, 255, 255),
-        -1
-    )
-
-    cv2.circle(
-        frame,
-        (
-            right[0] - pupil // 3,
-            right[1] - pupil // 3
-        ),
-        max(2, pupil // 3),
-        (255, 255, 255),
-        -1
-    )
-
-
-# ============================================================
-# ALIEN
-# ============================================================
-
-def filter_alien(frame, x, y, w, h):
-
-    ey = y + int(h * 0.40)
-
-    r = max(
-        20,
-        int(w * 0.15)
-    )
-
-    left = (
-        x + int(w * 0.30),
-        ey
-    )
-
-    right = (
-        x + int(w * 0.70),
-        ey
-    )
-
-    cv2.ellipse(
-        frame,
-        left,
-        (r, int(r * 1.35)),
-        -10,
-        0,
-        360,
-        (20, 230, 20),
-        -1
-    )
-
-    cv2.ellipse(
-        frame,
-        right,
-        (r, int(r * 1.35)),
-        10,
-        0,
-        360,
-        (20, 230, 20),
-        -1
-    )
-
-    cv2.ellipse(
-        frame,
-        left,
-        (int(r * .45), int(r * .85)),
-        0,
-        0,
-        360,
-        (5, 5, 5),
-        -1
-    )
-
-    cv2.ellipse(
-        frame,
-        right,
-        (int(r * .45), int(r * .85)),
-        0,
-        0,
-        360,
-        (5, 5, 5),
-        -1
-    )
-
-    # Alien antenna
-
-    cx = x + w // 2
-
-    cv2.line(
-        frame,
-        (cx, y),
-        (cx, y - int(h * .22)),
-        (20, 230, 20),
-        4
-    )
-
-    cv2.circle(
-        frame,
-        (cx, y - int(h * .22)),
-        8,
-        (0, 255, 255),
-        -1
-    )
-
-
-# ============================================================
-# DOG
-# ============================================================
-
-def filter_dog(frame, x, y, w, h):
-
-    # Ears
-
-    left = [
-        (x + int(w * .18), y + int(h * .18)),
-        (x - int(w * .02), y - int(h * .22)),
-        (x + int(w * .38), y + int(h * .20))
-    ]
-
-    right = [
-        (x + int(w * .82), y + int(h * .18)),
-        (x + int(w * 1.02), y - int(h * .22)),
-        (x + int(w * .62), y + int(h * .20))
-    ]
-
-    polygon(
-        frame,
-        left,
-        (75, 45, 25)
-    )
-
-    polygon(
-        frame,
-        right,
-        (75, 45, 25)
-    )
-
     # Nose
+    nose = f["nose"]
 
-    nose = (
-        x + w // 2,
-        y + int(h * .63)
-    )
-
-    cv2.ellipse(
+    ellipse(
         frame,
-        nose,
+        nose + [0, width * .02],
         (
-            int(w * .08),
-            int(h * .055)
+            width * .08,
+            width * .055
         ),
-        0,
-        0,
-        360,
-        (20, 20, 20),
-        -1
+        (20, 15, 15)
     )
 
     # Tongue
+    tongue = f["mouth"] + [
+        0,
+        width * .12
+    ]
 
     cv2.ellipse(
         frame,
+        tuple(np.int32(tongue)),
         (
-            x + w // 2,
-            y + int(h * .76)
-        ),
-        (
-            int(w * .08),
-            int(h * .13)
-        ),
-        0,
-        0,
-        180,
-        (100, 80, 220),
-        -1
-    )
-
-
-# ============================================================
-# CAT
-# ============================================================
-
-def filter_cat(frame, x, y, w, h):
-
-    left = [
-        (x + int(w * .12), y + int(h * .25)),
-        (x + int(w * .10), y - int(h * .20)),
-        (x + int(w * .42), y + int(h * .12))
-    ]
-
-    right = [
-        (x + int(w * .88), y + int(h * .25)),
-        (x + int(w * .90), y - int(h * .20)),
-        (x + int(w * .58), y + int(h * .12))
-    ]
-
-    polygon(
-        frame,
-        left,
-        (160, 100, 220)
-    )
-
-    polygon(
-        frame,
-        right,
-        (160, 100, 220)
-    )
-
-    # Nose
-
-    cv2.circle(
-        frame,
-        (
-            x + w // 2,
-            y + int(h * .64)
-        ),
-        max(7, int(w * .035)),
-        (120, 80, 180),
-        -1
-    )
-
-    # Whiskers
-
-    cx = x + w // 2
-    cy = y + int(h * .65)
-
-    for direction in (-1, 1):
-
-        for offset in (-1, 0, 1):
-
-            cv2.line(
-                frame,
-                (cx, cy + offset * 7),
-                (
-                    cx + direction * int(w * .40),
-                    cy + offset * 12
-                ),
-                (220, 220, 220),
-                2
-            )
-
-
-# ============================================================
-# DEVIL
-# ============================================================
-
-def filter_devil(frame, x, y, w, h):
-
-    left = [
-        (x + int(w * .15), y + int(h * .12)),
-        (x + int(w * .05), y - int(h * .35)),
-        (x + int(w * .40), y + int(h * .12))
-    ]
-
-    right = [
-        (x + int(w * .85), y + int(h * .12)),
-        (x + int(w * .95), y - int(h * .35)),
-        (x + int(w * .60), y + int(h * .12))
-    ]
-
-    polygon(
-        frame,
-        left,
-        (30, 30, 220)
-    )
-
-    polygon(
-        frame,
-        right,
-        (30, 30, 220)
-    )
-
-    # Red eyes
-
-    ey = y + int(h * .42)
-
-    for ex in (
-        x + int(w * .32),
-        x + int(w * .68)
-    ):
-
-        cv2.ellipse(
-            frame,
-            (ex, ey),
-            (
-                int(w * .09),
-                int(h * .045)
-            ),
-            0,
-            0,
-            360,
-            (0, 0, 255),
-            -1
-        )
-
-
-# ============================================================
-# CLOWN
-# ============================================================
-
-def filter_clown(frame, x, y, w, h):
-
-    cx = x + w // 2
-
-    # Red nose
-
-    cv2.circle(
-        frame,
-        (
-            cx,
-            y + int(h * .62)
-        ),
-        max(10, int(w * .08)),
-        (0, 0, 255),
-        -1
-    )
-
-    # Eye circles
-
-    ey = y + int(h * .43)
-
-    for ex in (
-        x + int(w * .30),
-        x + int(w * .70)
-    ):
-
-        cv2.circle(
-            frame,
-            (ex, ey),
-            max(7, int(w * .05)),
-            (255, 0, 255),
-            -1
-        )
-
-    # Big smile
-
-    cv2.ellipse(
-        frame,
-        (
-            cx,
-            y + int(h * .72)
-        ),
-        (
-            int(w * .23),
-            int(h * .13)
-        ),
-        0,
-        0,
-        180,
-        (0, 0, 255),
-        5
-    )
-
-
-# ============================================================
-# COWBOY
-# ============================================================
-
-def filter_cowboy(frame, x, y, w, h):
-
-    cx = x + w // 2
-
-    # Hat
-
-    cv2.ellipse(
-        frame,
-        (
-            cx,
-            y - int(h * .08)
-        ),
-        (
-            int(w * .58),
-            int(h * .14)
+            int(width * .06),
+            int(width * .14)
         ),
         0,
         0,
         360,
-        (35, 70, 120),
+        (80, 90, 210),
+        -1,
+        cv2.LINE_AA
+    )
+
+    return frame
+
+
+# ============================================================
+# FILTER 3 - CLOWN
+# ============================================================
+
+def clown_filter(frame, f):
+
+    width = f["width"]
+
+    # Giant nose
+    ellipse(
+        frame,
+        f["nose"],
+        (
+            width * .10,
+            width * .10
+        ),
+        (30, 30, 220)
+    )
+
+    # Huge mouth
+    mouth = f["mouth"]
+
+    ellipse(
+        frame,
+        mouth + [0, width * .025],
+        (
+            f["mouth_width"] * .60,
+            width * .16
+        ),
+        (25, 10, 20)
+    )
+
+    ellipse(
+        frame,
+        mouth + [0, width * .015],
+        (
+            f["mouth_width"] * .45,
+            width * .075
+        ),
+        (245, 245, 245)
+    )
+
+    # Forehead decoration
+    for i in range(5):
+
+        angle = i * math.pi / 4
+
+        x = (
+            f["forehead"][0]
+            + math.cos(angle) * width * .25
+        )
+
+        y = (
+            f["forehead"][1]
+            + math.sin(angle) * width * .25
+        )
+
+        cv2.circle(
+            frame,
+            (int(x), int(y)),
+            int(width * .025),
+            (40, 40, 220),
+            -1,
+            cv2.LINE_AA
+        )
+
+    return frame
+
+
+# ============================================================
+# FILTER 4 - ROBOT
+# ============================================================
+
+def robot_filter(frame, f):
+
+    width = f["width"]
+
+    # Dark face visor
+    center = midpoint(
+        f["forehead"],
+        f["chin"]
+    )
+
+    overlay = frame.copy()
+
+    cv2.ellipse(
+        overlay,
+        tuple(np.int32(center)),
+        (
+            int(width * .45),
+            int(width * .55)
+        ),
+        0,
+        0,
+        360,
+        (30, 35, 40),
+        -1,
+        cv2.LINE_AA
+    )
+
+    mask = np.zeros(
+        frame.shape[:2],
+        dtype=np.uint8
+    )
+
+    cv2.ellipse(
+        mask,
+        tuple(np.int32(center)),
+        (
+            int(width * .44),
+            int(width * .53)
+        ),
+        0,
+        0,
+        360,
+        255,
         -1
     )
 
-    polygon(
-        frame,
-        [
-            (
-                x + int(w * .25),
-                y - int(h * .08)
-            ),
-            (
-                x + int(w * .35),
-                y - int(h * .38)
-            ),
-            (
-                x + int(w * .65),
-                y - int(h * .38)
-            ),
-            (
-                x + int(w * .75),
-                y - int(h * .08)
-            )
-        ],
-        (35, 70, 120)
-    )
+    mask = cv2.GaussianBlur(
+        mask,
+        (31, 31),
+        0
+    )[:, :, None] / 255.0
 
-    # Hat band
+    frame[:] = (
+        overlay * mask
+        + frame * (1 - mask)
+    ).astype(np.uint8)
+
+    for eye in (
+        f["left_eye"],
+        f["right_eye"]
+    ):
+
+        cv2.rectangle(
+            frame,
+            (
+                int(eye[0] - width * .08),
+                int(eye[1] - width * .025)
+            ),
+            (
+                int(eye[0] + width * .08),
+                int(eye[1] + width * .025)
+            ),
+            (80, 230, 255),
+            -1
+        )
+
+    # Robot mouth
+    x = int(f["mouth"][0])
+    y = int(f["mouth"][1])
 
     cv2.line(
         frame,
-        (
-            x + int(w * .30),
-            y - int(h * .13)
-        ),
-        (
-            x + int(w * .70),
-            y - int(h * .13)
-        ),
-        (20, 20, 40),
-        7
+        (x - int(width * .15), y),
+        (x + int(width * .15), y),
+        (80, 230, 255),
+        4
     )
 
+    return frame
+
 
 # ============================================================
-# CROWN
+# FILTER 5 - GIANT FACE
 # ============================================================
 
-def filter_crown(frame, x, y, w, h):
+def giant_face_filter(frame, f):
 
-    points = [
-        (
-            x + int(w * .12),
-            y + int(h * .10)
+    width = f["width"]
+
+    # Enlarged entire face
+    frame = remap_face(
+        frame,
+        midpoint(
+            f["forehead"],
+            f["chin"]
         ),
-        (
-            x + int(w * .20),
-            y - int(h * .35)
-        ),
-        (
-            x + int(w * .42),
-            y - int(h * .08)
-        ),
-        (
-            x + int(w * .50),
-            y - int(h * .42)
-        ),
-        (
-            x + int(w * .58),
-            y - int(h * .08)
-        ),
-        (
-            x + int(w * .80),
-            y - int(h * .35)
-        ),
-        (
-            x + int(w * .88),
-            y + int(h * .10)
+        width * .70,
+        width * .85,
+        1.25,
+        1.18
+    )
+
+    # Giant eyes
+    for eye in (
+        f["left_eye"],
+        f["right_eye"]
+    ):
+
+        size = width * .13
+
+        ellipse(
+            frame,
+            eye,
+            (
+                size * 1.45,
+                size * 1.15
+            ),
+            (245, 245, 245)
         )
+
+        ellipse(
+            frame,
+            eye,
+            (
+                size * .50,
+                size * .75
+            ),
+            (20, 20, 20)
+        )
+
+    return frame
+
+
+# ============================================================
+# FILTER 6 - OLD MAN
+# ============================================================
+
+def old_man_filter(frame, f):
+
+    width = f["width"]
+
+    # Gray hair
+    hair_center = f["forehead"] + [
+        0,
+        -width * .12
     ]
 
-    polygon(
+    ellipse(
         frame,
-        points,
-        (0, 215, 255)
+        hair_center,
+        (
+            width * .38,
+            width * .15
+        ),
+        (155, 155, 155)
+    )
+
+    # Eyebrows
+    line(
+        frame,
+        f["left_eye"] + [-width * .10, -width * .06],
+        f["left_eye"] + [width * .10, -width * .08],
+        (90, 90, 90),
+        5
+    )
+
+    line(
+        frame,
+        f["right_eye"] + [-width * .10, -width * .08],
+        f["right_eye"] + [width * .10, -width * .06],
+        (90, 90, 90),
+        5
+    )
+
+    # Beard
+    beard_center = f["chin"]
+
+    ellipse(
+        frame,
+        beard_center + [0, -width * .03],
+        (
+            width * .25,
+            width * .22
+        ),
+        (110, 110, 110)
+    )
+
+    # Wrinkles
+    for offset in (-0.06, -0.025, 0.025, 0.06):
+
+        y = f["forehead"][1] + width * offset
+
+        line(
+            frame,
+            f["forehead"] + [-width * .16, y - f["forehead"][1]],
+            f["forehead"] + [width * .16, y - f["forehead"][1]],
+            (100, 100, 100),
+            1
+        )
+
+    return frame
+
+
+# ============================================================
+# FILTER 7 - CROWN
+# ============================================================
+
+def crown_filter(frame, f):
+
+    width = f["width"]
+
+    base_y = int(
+        f["forehead"][1] - width * .12
+    )
+
+    left_x = int(
+        f["forehead"][0] - width * .35
+    )
+
+    right_x = int(
+        f["forehead"][0] + width * .35
+    )
+
+    points = np.array([
+        [left_x, base_y],
+        [left_x + int(width * .08), base_y - int(width * .28)],
+        [left_x + int(width * .20), base_y - int(width * .08)],
+        [left_x + int(width * .35), base_y - int(width * .35)],
+        [left_x + int(width * .48), base_y - int(width * .08)],
+        [right_x, base_y]
+    ], dtype=np.int32)
+
+    cv2.fillPoly(
+        frame,
+        [points],
+        (20, 180, 245)
     )
 
     cv2.polylines(
         frame,
-        [np.array(points)],
+        [points],
         True,
-        (0, 160, 220),
-        4
+        (0, 220, 255),
+        4,
+        cv2.LINE_AA
     )
 
-    # Jewels
-
-    for px in (
-        x + int(w * .30),
-        x + int(w * .50),
-        x + int(w * .70)
-    ):
+    # Gems
+    for x, y in points[1:-1]:
 
         cv2.circle(
             frame,
-            (
-                px,
-                y + int(h * .02)
-            ),
-            7,
-            (0, 0, 255),
-            -1
+            (x, y),
+            max(3, int(width * .025)),
+            (255, 255, 255),
+            -1,
+            cv2.LINE_AA
         )
 
-
-# ============================================================
-# NERD
-# ============================================================
-
-def filter_nerd(frame, x, y, w, h):
-
-    ey = y + int(h * .42)
-
-    r = int(w * .15)
-
-    left = (
-        x + int(w * .32),
-        ey
-    )
-
-    right = (
-        x + int(w * .68),
-        ey
-    )
-
-    for eye in (left, right):
-
-        cv2.rectangle(
-            frame,
-            (
-                eye[0] - r,
-                eye[1] - int(r * .7)
-            ),
-            (
-                eye[0] + r,
-                eye[1] + int(r * .7)
-            ),
-            (30, 30, 30),
-            7
-        )
-
-    cv2.line(
-        frame,
-        (
-            left[0] + r,
-            ey
-        ),
-        (
-            right[0] - r,
-            ey
-        ),
-        (30, 30, 30),
-        6
-    )
+    return frame
 
 
 # ============================================================
-# MONOCLE
+# FILTER 8 - WIZARD
 # ============================================================
 
-def filter_monocle(frame, x, y, w, h):
+def wizard_filter(frame, f):
 
-    cx = x + int(w * .34)
-    cy = y + int(h * .40)
+    width = f["width"]
 
-    r = int(w * .16)
-
-    cv2.circle(
-        frame,
-        (cx, cy),
-        r,
-        (190, 150, 50),
-        6
-    )
-
-    cv2.line(
-        frame,
-        (
-            cx + r,
-            cy - r
-        ),
-        (
-            cx + r + int(w * .10),
-            cy - int(h * .18)
-        ),
-        (190, 150, 50),
-        4
-    )
-
-
-# ============================================================
-# ROBOT
-# ============================================================
-
-def filter_robot(frame, x, y, w, h):
-
-    # Robot eyes
-
-    ey = y + int(h * .42)
-
-    for ex in (
-        x + int(w * .32),
-        x + int(w * .68)
-    ):
-
-        cv2.rectangle(
-            frame,
-            (
-                ex - int(w * .08),
-                ey - int(h * .06)
-            ),
-            (
-                ex + int(w * .08),
-                ey + int(h * .06)
-            ),
-            (180, 220, 255),
-            -1
-        )
-
-    # Robot antenna
-
-    cx = x + w // 2
-
-    cv2.line(
-        frame,
-        (
-            cx,
-            y
-        ),
-        (
-            cx,
-            y - int(h * .25)
-        ),
-        (180, 180, 180),
-        5
-    )
-
-    cv2.circle(
-        frame,
-        (
-            cx,
-            y - int(h * .25)
-        ),
-        10,
-        (0, 0, 255),
-        -1
-    )
-
-    # Robot mouth
-
-    cv2.rectangle(
-        frame,
-        (
-            x + int(w * .30),
-            y + int(h * .70)
-        ),
-        (
-            x + int(w * .70),
-            y + int(h * .77)
-        ),
-        (180, 220, 255),
-        -1
-    )
-
-
-# ============================================================
-# BIG MOUTH
-# ============================================================
-
-def filter_big_mouth(frame, x, y, w, h):
-
-    cx = x + w // 2
-    cy = y + int(h * .70)
-
-    cv2.ellipse(
-        frame,
-        (cx, cy),
-        (
-            int(w * .25),
-            int(h * .15)
-        ),
+    # Hat
+    top = f["forehead"] + [
         0,
-        0,
-        360,
-        (30, 30, 30),
-        -1
-    )
-
-    # Teeth
-
-    cv2.rectangle(
-        frame,
-        (
-            cx - int(w * .18),
-            cy - int(h * .08)
-        ),
-        (
-            cx + int(w * .18),
-            cy
-        ),
-        (245, 245, 245),
-        -1
-    )
-
-
-# ============================================================
-# FACE ACCESSORY COMBINATIONS
-# ============================================================
-
-def combo_random(frame, x, y, w, h):
-
-    effects = [
-        filter_sunglasses,
-        filter_crown,
-        filter_moustache,
-        filter_big_eyes,
-        filter_nerd,
-        filter_monocle
+        -width * .25
     ]
 
-    chosen = random.sample(
-        effects,
-        random.randint(2, 3)
+    pts = np.array([
+        [
+            int(top[0] - width * .35),
+            int(top[1] + width * .25)
+        ],
+        [
+            int(top[0] + width * .35),
+            int(top[1] + width * .25)
+        ],
+        [
+            int(top[0] + width * .05),
+            int(top[1] - width * .42)
+        ]
+    ], dtype=np.int32)
+
+    cv2.fillPoly(
+        frame,
+        [pts],
+        (100, 45, 145)
     )
 
-    for effect in chosen:
+    cv2.polylines(
+        frame,
+        [pts],
+        True,
+        (200, 130, 255),
+        3,
+        cv2.LINE_AA
+    )
 
-        effect(
-            frame,
-            x,
-            y,
-            w,
-            h
+    # Beard
+    beard = f["chin"]
+
+    ellipse(
+        frame,
+        beard + [0, -width * .03],
+        (
+            width * .25,
+            width * .28
+        ),
+        (70, 55, 50)
+    )
+
+    # Magic particles
+    for i in range(12):
+
+        angle = (
+            i * math.pi * 2 / 12
         )
+
+        radius = width * (
+            .40 + (i % 3) * .10
+        )
+
+        x = (
+            f["mouth"][0]
+            + math.cos(angle) * radius
+        )
+
+        y = (
+            f["mouth"][1]
+            + math.sin(angle) * radius
+        )
+
+        cv2.circle(
+            frame,
+            (int(x), int(y)),
+            max(2, int(width * .012)),
+            (180, 120, 255),
+            -1,
+            cv2.LINE_AA
+        )
+
+    return frame
 
 
 # ============================================================
@@ -964,65 +854,117 @@ def combo_random(frame, x, y, w, h):
 # ============================================================
 
 FILTERS = [
-    ("Sunglasses", filter_sunglasses),
-    ("Big Eyes", filter_big_eyes),
-    ("Alien", filter_alien),
-    ("Dog", filter_dog),
-    ("Cat", filter_cat),
-    ("Devil", filter_devil),
-    ("Clown", filter_clown),
-    ("Cowboy", filter_cowboy),
-    ("King", filter_crown),
-    ("Nerd", filter_nerd),
-    ("Monocle", filter_monocle),
-    ("Robot", filter_robot),
-    ("Big Mouth", filter_big_mouth),
-    ("Random Combo", combo_random)
+    ("ALIEN", alien_filter),
+    ("DOG", dog_filter),
+    ("CLOWN", clown_filter),
+    ("ROBOT", robot_filter),
+    ("GIANT FACE", giant_face_filter),
+    ("OLD MAN", old_man_filter),
+    ("ROYAL", crown_filter),
+    ("WIZARD", wizard_filter),
 ]
 
 
 # ============================================================
-# PARTICLES
+# UI
 # ============================================================
 
-def draw_particles(frame, x, y, w, h):
+def draw_ui(frame, filter_name, active):
 
-    random.seed(
-        int(time.time() * 2)
+    h, w = frame.shape[:2]
+
+    overlay = frame.copy()
+
+    cv2.rectangle(
+        overlay,
+        (0, 0),
+        (w, 65),
+        (8, 8, 15),
+        -1
     )
 
-    symbols = [
-        "★",
-        "♥",
-        "✦"
-    ]
+    frame[:] = cv2.addWeighted(
+        overlay,
+        .82,
+        frame,
+        .18,
+        0
+    )
 
-    for _ in range(5):
+    cv2.putText(
+        frame,
+        "AI COLLEGE",
+        (18, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        .65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
 
-        px = random.randint(
-            x - int(w * .3),
-            x + int(w * 1.3)
-        )
+    cv2.putText(
+        frame,
+        "OFFLINE AR",
+        (18, 50),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        .35,
+        (170, 220, 230),
+        1,
+        cv2.LINE_AA
+    )
 
-        py = random.randint(
-            y - int(h * .4),
-            y + int(h * 1.2)
-        )
+    if active:
 
-        symbol = random.choice(
-            symbols
-        )
+        text = filter_name
 
         cv2.putText(
             frame,
-            symbol,
-            (px, py),
+            text,
+            (
+                w - 150,
+                38
+            ),
             cv2.FONT_HERSHEY_SIMPLEX,
-            random.uniform(.5, 1.0),
-            (255, 220, 50),
+            .45,
+            (255, 255, 255),
             2,
             cv2.LINE_AA
         )
+
+    else:
+
+        cv2.putText(
+            frame,
+            "STEP INTO THE AR ZONE",
+            (
+                w - 235,
+                38
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            .38,
+            (180, 220, 220),
+            1,
+            cv2.LINE_AA
+        )
+
+    cv2.rectangle(
+        frame,
+        (0, h - 24),
+        (w, h),
+        (8, 8, 15),
+        -1
+    )
+
+    cv2.putText(
+        frame,
+        "100% OFFLINE  •  AI COLLEGE EXHIBITION",
+        (12, h - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        .30,
+        (170, 200, 205),
+        1,
+        cv2.LINE_AA
+    )
 
 
 # ============================================================
@@ -1031,24 +973,42 @@ def draw_particles(frame, x, y, w, h):
 
 def main():
 
-    print("=" * 55)
-    print("          AI COLLEGE - OFFLINE AR")
-    print("=" * 55)
-    print("Camera starting...")
-    print("Waiting for visitors...")
+    print("=" * 60)
+    print("                 AI COLLEGE")
+    print("              OFFLINE AR ENGINE")
+    print("=" * 60)
+    print()
+    print("Camera:", CAMERA_INDEX)
+    print("Resolution:", WIDTH, "x", HEIGHT)
+    print("Filters:", len(FILTERS))
+    print()
+    print("Waiting for visitor...")
     print()
 
-    detector = cv2.CascadeClassifier(
-        FACE_CASCADE
+    options = FaceLandmarkerOptions(
+
+        base_options=BaseOptions(
+            model_asset_path=MODEL_PATH
+        ),
+
+        running_mode=RunningMode.VIDEO,
+
+        num_faces=1,
+
+        min_face_detection_confidence=.50,
+
+        min_face_presence_confidence=.50,
+
+        min_tracking_confidence=.50,
+
+        output_face_blendshapes=False,
+
+        output_facial_transformation_matrixes=False
     )
 
-    if detector.empty():
-
-        print(
-            "ERROR: Face detector failed."
-        )
-
-        return
+    detector = FaceLandmarker.create_from_options(
+        options
+    )
 
     camera = cv2.VideoCapture(
         CAMERA_INDEX
@@ -1056,37 +1016,53 @@ def main():
 
     if not camera.isOpened():
 
-        print(
-            "ERROR: Camera could not be opened."
-        )
+        print("ERROR: Could not open camera.")
+
+        detector.close()
 
         return
 
     camera.set(
         cv2.CAP_PROP_FRAME_WIDTH,
-        1280
+        WIDTH
     )
 
     camera.set(
         cv2.CAP_PROP_FRAME_HEIGHT,
-        720
+        HEIGHT
+    )
+
+    camera.set(
+        cv2.CAP_PROP_BUFFERSIZE,
+        1
+    )
+
+    smoother = FaceSmoother(
+        alpha=.55
     )
 
     active_filter = None
     filter_name = ""
 
-    person_detected = False
+    visitor_active = False
 
     last_face_time = 0
 
-    print("SYSTEM READY.")
-    print()
+    timestamp = 0
+
+    previous_time = time.time()
+
+    fps = 0
+
+    frame_counter = 0
+
+    fps_time = time.time()
 
     while True:
 
-        success, frame = camera.read()
+        ok, frame = camera.read()
 
-        if not success:
+        if not ok:
             continue
 
         frame = cv2.flip(
@@ -1094,253 +1070,196 @@ def main():
             1
         )
 
-        gray = cv2.cvtColor(
+        h, w = frame.shape[:2]
+
+        rgb = cv2.cvtColor(
             frame,
-            cv2.COLOR_BGR2GRAY
+            cv2.COLOR_BGR2RGB
         )
 
-        faces = detector.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=6,
-            minSize=(100, 100)
+        image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb
         )
 
-        closest_face = None
+        timestamp += 33
 
-        if len(faces) > 0:
+        result = detector.detect_for_video(
+            image,
+            timestamp
+        )
 
-            closest_face = max(
-                faces,
-                key=lambda f: f[2] * f[3]
-            )
+        active = False
 
-        close_enough = False
+        if result.face_landmarks:
 
-        if closest_face is not None:
+            landmarks = result.face_landmarks[0]
 
-            x, y, w, h = closest_face
-
-            if w >= MIN_FACE_WIDTH:
-
-                close_enough = True
-
-        # ====================================================
-        # NEW VISITOR
-        # ====================================================
-
-        if close_enough:
-
-            last_face_time = time.time()
-
-            if not person_detected:
-
-                person_detected = True
-
-                filter_name, active_filter = random.choice(
-                    FILTERS
-                )
-
-                print(
-                    f"Visitor detected → {filter_name}"
-                )
-
-        # ====================================================
-        # ACTIVE FILTER
-        # ====================================================
-
-        if person_detected and close_enough:
-
-            x, y, w, h = closest_face
-
-            active_filter(
-                frame,
-                x,
-                y,
+            info = get_face_info(
+                landmarks,
                 w,
                 h
             )
 
-            draw_particles(
-                frame,
-                x,
-                y,
-                w,
-                h
-            )
+            # ------------------------------------------------
+            # PERSON IS CLOSE ENOUGH
+            # ------------------------------------------------
 
-        # ====================================================
-        # PERSON LEFT
-        # ====================================================
+            if info["width"] >= MIN_FACE_WIDTH:
 
-        if person_detected:
+                active = True
 
-            if not close_enough:
+                last_face_time = time.time()
 
-                if (
-                    time.time()
-                    - last_face_time
-                    > RESET_DELAY
-                ):
+                if not visitor_active:
 
-                    person_detected = False
+                    visitor_active = True
 
-                    active_filter = None
+                    smoother.reset()
 
-                    filter_name = ""
-
-                    print(
-                        "Visitor left → waiting..."
+                    # Choose ONE random filter
+                    # for this visitor.
+                    active_filter = random.choice(
+                        FILTERS
                     )
 
-        # ====================================================
-        # UI
-        # ====================================================
+                    filter_name = active_filter[0]
 
-        height, width = frame.shape[:2]
+                    print(
+                        f"Visitor detected -> {filter_name}"
+                    )
 
-        # Header
+                # Smooth landmarks
+                raw_points = np.array(
+                    [
+                        [lm.x * w, lm.y * h]
+                        for lm in landmarks
+                    ],
+                    dtype=np.float32
+                )
 
-        overlay = frame.copy()
+                smooth_points = smoother.update(
+                    raw_points
+                )
 
-        cv2.rectangle(
-            overlay,
-            (0, 0),
-            (width, 82),
-            (10, 10, 20),
-            -1
-        )
+                # Reconstruct relevant information
+                # from smoothed points.
+                info["left_eye"] = smooth_points[33:134].mean(axis=0)
+                info["right_eye"] = smooth_points[263:363].mean(axis=0)
 
-        frame = cv2.addWeighted(
-            overlay,
-            .88,
-            frame,
-            .12,
-            0
-        )
+                info["nose"] = smooth_points[1]
+                info["mouth"] = smooth_points[13]
 
-        cv2.putText(
-            frame,
-            "AI COLLEGE",
-            (25, 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            .85,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
+                info["mouth_width"] = dist(
+                    smooth_points[61],
+                    smooth_points[291]
+                )
 
-        cv2.putText(
-            frame,
-            "OFFLINE AR EXPERIENCE",
-            (25, 63),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            .48,
-            (170, 200, 255),
-            1,
-            cv2.LINE_AA
-        )
+                info["forehead"] = smooth_points[10]
+                info["chin"] = smooth_points[152]
 
-        if person_detected:
+                info["left"] = smooth_points[234]
+                info["right"] = smooth_points[454]
 
-            status = "AR FILTER ACTIVE"
+                # ------------------------------------------------
+                # RUN FILTER
+                # ------------------------------------------------
 
-            cv2.putText(
-                frame,
-                status,
-                (
-                    width - 270,
-                    38
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                .55,
-                (0, 255, 120),
-                2,
-                cv2.LINE_AA
-            )
+                output = active_filter[1](
+                    frame,
+                    info
+                )
 
-            cv2.putText(
-                frame,
-                filter_name.upper(),
-                (
-                    width - 270,
-                    65
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                .45,
-                (255, 220, 100),
-                1,
-                cv2.LINE_AA
-            )
+            else:
+
+                output = frame
 
         else:
 
-            cv2.putText(
-                frame,
-                "READY",
-                (
-                    width - 130,
-                    42
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                .55,
-                (180, 180, 180),
-                1,
-                cv2.LINE_AA
+            output = frame
+
+        # ----------------------------------------------------
+        # PERSON LEFT
+        # ----------------------------------------------------
+
+        if (
+            visitor_active
+            and time.time() - last_face_time
+            > LOST_FACE_TIMEOUT
+        ):
+
+            visitor_active = False
+
+            active_filter = None
+
+            filter_name = ""
+
+            smoother.reset()
+
+            print(
+                "Visitor left. Waiting for next visitor..."
             )
 
-            text_center(
-                frame,
-                "STEP CLOSER",
-                height // 2,
-                .85,
-                2
+        # ----------------------------------------------------
+        # FPS
+        # ----------------------------------------------------
+
+        frame_counter += 1
+
+        now = time.time()
+
+        if now - fps_time >= 1.0:
+
+            fps = frame_counter / (
+                now - fps_time
             )
 
-        # Bottom bar
+            frame_counter = 0
 
-        cv2.rectangle(
-            frame,
-            (
-                0,
-                height - 38
-            ),
-            (
-                width,
-                height
-            ),
-            (10, 10, 20),
-            -1
+            fps_time = now
+
+        # ----------------------------------------------------
+        # UI
+        # ----------------------------------------------------
+
+        draw_ui(
+            output,
+            filter_name,
+            active
         )
 
         cv2.putText(
-            frame,
-            "100% OFFLINE  •  AI COLLEGE",
+            output,
+            f"{fps:.0f} FPS",
             (
-                20,
-                height - 13
+                w - 65,
+                h - 8
             ),
             cv2.FONT_HERSHEY_SIMPLEX,
-            .42,
-            (150, 150, 150),
+            .28,
+            (120, 120, 120),
             1,
             cv2.LINE_AA
         )
 
         cv2.imshow(
             WINDOW_NAME,
-            frame
+            output
         )
 
         key = cv2.waitKey(1) & 0xFF
 
-        if key == 27:
-
+        if key == 27 or key == ord("q"):
             break
 
     camera.release()
 
+    detector.close()
+
     cv2.destroyAllWindows()
+
+    print()
+    print("AR system stopped.")
 
 
 if __name__ == "__main__":
