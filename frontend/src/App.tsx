@@ -1,71 +1,52 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react'
-import { Loading } from './components/Loading'
-import { api, clearDashboardKey, setDashboardKey } from './services/api'
-import { Assistant } from './pages/Assistant'
+import { FormEvent, useEffect, useState } from 'react'
+import { api } from './services/api'
 import type { AIStatus } from './types'
 
-function AssistantPage() {
-  const [aiStatus, setAiStatus] = useState<AIStatus>()
-  const refreshStatus = useCallback(async () => {
-    try {
-      setAiStatus(await api.aiStatus())
-    } catch {
-      setAiStatus(undefined)
-    }
-  }, [])
+type Message = { role: 'user' | 'assistant'; content: string }
 
-  useEffect(() => {
-    void refreshStatus()
-  }, [refreshStatus])
-
-  return <main className="assistant-page"><Assistant aiStatus={aiStatus} refreshStatus={refreshStatus} /></main>
-}
-
-function DashboardLogin({ onSuccess }: { onSuccess: () => void }) {
-  const [key, setKey] = useState('')
+export default function App() {
+  const [status, setStatus] = useState<AIStatus>()
+  const [messages, setMessages] = useState<Message[]>([])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  async function refreshStatus() {
+    try { setStatus(await api.aiStatus()) } catch { setStatus(undefined) }
+  }
+
+  useEffect(() => { void refreshStatus() }, [])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    setDashboardKey(key)
+    const message = input.trim()
+    if (!message || loading) return
+    setError('')
+    setMessages(previous => [...previous, { role: 'user', content: message }])
+    setInput('')
+    setLoading(true)
     try {
-      await api.dashboardAccess()
-      onSuccess()
-    } catch {
-      clearDashboardKey()
-      setError('Invalid dashboard access key.')
-    }
+      const result = await api.chat(message)
+      setMessages(previous => [...previous, { role: 'assistant', content: result.response }])
+      await refreshStatus()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The local LLM is unavailable.')
+    } finally { setLoading(false) }
   }
 
-  return (
-    <main className="access-page">
-      <section className="panel access-panel">
-        <h1>AI COLLEGE</h1>
-        <p>This address is restricted to authorized users. Set <code>DASHBOARD_ACCESS_KEY</code> in <code>.env</code> on the backend side.</p>
-        <form onSubmit={submit}>
-          <input type="password" value={key} onChange={event => setKey(event.target.value)} placeholder="Dashboard access key" autoFocus />
-          <button type="submit">Enter dashboard</button>
-        </form>
-        <button className="clear-button" onClick={() => { clearDashboardKey(); setKey(''); setError('') }} type="button">
-          Clear saved key
-        </button>
-        {error && <div className="error">{error}</div>}
-      </section>
-    </main>
-  )
-}
-
-export default function App() {
-  const assistantMode = import.meta.env.VITE_APP_MODE === 'assistant'
-  const [authorized, setAuthorized] = useState<boolean | undefined>(assistantMode ? true : undefined)
-
-  useEffect(() => {
-    if (assistantMode) return
-    api.dashboardAccess().then(() => setAuthorized(true)).catch(() => setAuthorized(false))
-  }, [assistantMode])
-
-  if (assistantMode) return <AssistantPage />
-  if (authorized === false) return <DashboardLogin onSuccess={() => setAuthorized(true)} />
-  if (authorized !== true) return <Loading />
-  return <AssistantPage />
+  const online = status?.status === 'online'
+  return <main>
+    <header>
+      <div><p className="eyebrow">LOCAL LLM</p><h1>AI Assistant</h1></div>
+      <span className={online ? 'status online' : 'status'}>{online ? 'online' : 'offline'}{status?.model ? ` · ${status.model}` : ''}</span>
+    </header>
+    <section className="chat" aria-live="polite">
+      {!messages.length && <p className="empty">Ask your local model anything.</p>}
+      {messages.map((item, index) => <article className={item.role} key={`${item.role}-${index}`}><strong>{item.role === 'user' ? 'You' : 'AI'}</strong><p>{item.content}</p></article>)}
+      {loading && <article className="assistant"><strong>AI</strong><p>Thinking…</p></article>}
+    </section>
+    {error && <p className="error">{error}</p>}
+    {!online && <p className="hint">Start Ollama and make sure the configured model is installed.</p>}
+    <form onSubmit={submit}><textarea value={input} onChange={event => setInput(event.target.value)} placeholder="Message the local LLM…" disabled={!online || loading} rows={3} /><button disabled={!online || loading || !input.trim()}>{loading ? 'Thinking…' : 'Send'}</button></form>
+  </main>
 }

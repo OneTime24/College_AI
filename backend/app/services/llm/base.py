@@ -15,9 +15,6 @@ class ProviderStatus:
     runtime: str
     model_available: bool
     status: str
-    supports_image_input: bool = False
-    supports_voice_input: bool = False
-    supports_voice_output: bool = False
 
 
 class LLMProvider(ABC):
@@ -25,7 +22,7 @@ class LLMProvider(ABC):
     model: str
 
     @abstractmethod
-    async def generate(self, message: str, system_prompt: str, images: list[str] | None = None) -> str:
+    async def generate(self, message: str, system_prompt: str) -> str:
         """Generate one non-streamed assistant response."""
 
     @abstractmethod
