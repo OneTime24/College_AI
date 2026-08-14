@@ -1,1124 +1,896 @@
-from flask import Flask, render_template_string, request, jsonify
-
-app = Flask(__name__)
-
-LOCATIONS = {
-    "main gate": {
-        "name": "Main Gate",
-        "building": "Main Entrance",
-        "floor": "Ground Floor",
-        "description": "The main entrance of the college.",
-        "x": 100,
-        "y": 400
-    },
-    "admin block": {
-        "name": "Admin Block",
-        "building": "Administration Block",
-        "floor": "Ground Floor",
-        "description": "Administration offices, principal office and reception.",
-        "x": 300,
-        "y": 250
-    },
-    "computer lab": {
-        "name": "Computer Lab",
-        "building": "CS Block",
-        "floor": "2nd Floor",
-        "description": "Computer science laboratory.",
-        "x": 650,
-        "y": 180
-    },
-    "cs department": {
-        "name": "CS Department",
-        "building": "CS Block",
-        "floor": "2nd Floor",
-        "description": "Computer Science department offices.",
-        "x": 650,
-        "y": 300
-    },
-    "library": {
-        "name": "Library",
-        "building": "Academic Block",
-        "floor": "1st Floor",
-        "description": "College library and study area.",
-        "x": 430,
-        "y": 450
-    },
-    "cafeteria": {
-        "name": "Cafeteria",
-        "building": "Student Center",
-        "floor": "Ground Floor",
-        "description": "College cafeteria and student seating area.",
-        "x": 700,
-        "y": 480
-    },
-    "physics lab": {
-        "name": "Physics Lab",
-        "building": "Science Block",
-        "floor": "1st Floor",
-        "description": "Physics laboratory.",
-        "x": 220,
-        "y": 520
-    },
-    "lecture hall": {
-        "name": "Lecture Hall",
-        "building": "Academic Block",
-        "floor": "Ground Floor",
-        "description": "Large lecture hall for classes and events.",
-        "x": 450,
-        "y": 170
-    },
-    "principal office": {
-        "name": "Principal Office",
-        "building": "Admin Block",
-        "floor": "1st Floor",
-        "description": "Office of the college principal.",
-        "x": 320,
-        "y": 180
-    },
-    "parking": {
-        "name": "Parking",
-        "building": "Parking Area",
-        "floor": "Ground",
-        "description": "College parking area.",
-        "x": 80,
-        "y": 180
-    }
-}
-
-ALIASES = {
-    "cs lab": "computer lab",
-    "computer science lab": "computer lab",
-    "computing lab": "computer lab",
-    "computer department": "cs department",
-    "computer science department": "cs department",
-    "library": "library",
-    "canteen": "cafeteria",
-    "food": "cafeteria",
-    "principal": "principal office",
-    "entrance": "main gate",
-    "gate": "main gate",
-    "car parking": "parking",
-    "parking area": "parking"
-}
-
-
-def normalize(text):
-    return " ".join(text.lower().strip().split())
-
-
-def find_location(query):
-    query = normalize(query)
-
-    if query in LOCATIONS:
-        return query
-
-    if query in ALIASES:
-        return ALIASES[query]
-
-    for key in LOCATIONS:
-        if key in query:
-            return key
-
-    for alias, target in ALIASES.items():
-        if alias in query:
-            return target
-
-    return None
-
-
-def calculate_route(start, destination):
-    if not start:
-        return [
-            destination
-        ]
-
-    return [start, destination]
-
-
-def process_query(query):
-    q = normalize(query)
-
-    destination = find_location(q)
-
-    if not destination:
-        return {
-            "success": False,
-            "message": (
-                "I couldn't find that location. "
-                "Try asking for the library, computer lab, "
-                "CS department, cafeteria, admin block or main gate."
-            )
-        }
-
-    location = LOCATIONS[destination]
-
-    route = calculate_route(None, destination)
-
-    if any(word in q for word in [
-        "where is",
-        "where's",
-        "location of",
-        "find",
-        "take me",
-        "how do i get",
-        "how can i get",
-        "directions"
-    ]):
-        message = (
-            f"{location['name']} is in the {location['building']}, "
-            f"{location['floor']}. {location['description']}"
-        )
-    else:
-        message = (
-            f"{location['name']} is in the {location['building']}, "
-            f"{location['floor']}."
-        )
-
-    return {
-        "success": True,
-        "message": message,
-        "location": destination,
-        "data": location,
-        "route": route
-    }
-
-
-HTML = r"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-<title>AI Campus Navigator</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    background: #0b0f14;
-    color: #e8edf3;
-    font-family: Arial, Helvetica, sans-serif;
-}
-
-header {
-    height: 70px;
-    border-bottom: 1px solid #222a33;
-    display: flex;
-    align-items: center;
-    padding: 0 30px;
-    background: #0d1218;
-}
-
-.logo {
-    font-size: 21px;
-    font-weight: bold;
-}
-
-.logo span {
-    color: #4da3ff;
-}
-
-.status {
-    margin-left: auto;
-    font-size: 13px;
-    color: #7ee787;
-}
-
-.container {
-    display: grid;
-    grid-template-columns: 390px 1fr;
-    height: calc(100vh - 70px);
-}
-
-.sidebar {
-    border-right: 1px solid #222a33;
-    padding: 25px;
-    background: #0d1218;
-}
-
-.title {
-    font-size: 28px;
-    font-weight: bold;
-    margin-bottom: 8px;
-}
-
-.subtitle {
-    color: #7f8b98;
-    font-size: 14px;
-    line-height: 1.5;
-    margin-bottom: 25px;
-}
-
-.search {
-    display: flex;
-    gap: 8px;
-}
-
-input {
-    flex: 1;
-    background: #151c24;
-    border: 1px solid #2b3541;
-    color: white;
-    padding: 14px;
-    border-radius: 8px;
-    outline: none;
-}
-
-input:focus {
-    border-color: #4da3ff;
-}
-
-button {
-    border: none;
-    border-radius: 8px;
-    padding: 12px 15px;
-    cursor: pointer;
-    font-weight: bold;
-}
-
-.ask {
-    background: #2563eb;
-    color: white;
-}
-
-.mic {
-    background: #1b2530;
-    color: white;
-}
-
-.mic.active {
-    background: #dc2626;
-}
-
-.examples {
-    margin-top: 25px;
-}
-
-.examples-title {
-    color: #7f8b98;
-    font-size: 12px;
-    text-transform: uppercase;
-    margin-bottom: 10px;
-}
-
-.example {
-    background: #131a22;
-    border: 1px solid #202a35;
-    padding: 11px;
-    border-radius: 7px;
-    margin-bottom: 7px;
-    cursor: pointer;
-    font-size: 13px;
-}
-
-.example:hover {
-    border-color: #3d8df5;
-}
-
-.response {
-    margin-top: 25px;
-    background: #121922;
-    border: 1px solid #202a35;
-    border-radius: 10px;
-    padding: 18px;
-}
-
-.response-title {
-    color: #7f8b98;
-    font-size: 12px;
-    text-transform: uppercase;
-    margin-bottom: 10px;
-}
-
-.response-text {
-    line-height: 1.5;
-}
-
-.location-card {
-    margin-top: 15px;
-    padding: 15px;
-    background: #17202a;
-    border-radius: 8px;
-    display: none;
-}
-
-.location-name {
-    font-size: 18px;
-    font-weight: bold;
-    margin-bottom: 8px;
-}
-
-.location-info {
-    color: #9ca8b5;
-    font-size: 13px;
-    line-height: 1.6;
-}
-
-.map-container {
-    position: relative;
-    overflow: hidden;
-    background:
-        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
-    background-size: 40px 40px;
-}
-
-.map-header {
-    position: absolute;
-    top: 20px;
-    left: 25px;
-    z-index: 10;
-}
-
-.map-title {
-    font-size: 18px;
-    font-weight: bold;
-}
-
-.map-subtitle {
-    color: #788594;
-    font-size: 12px;
-    margin-top: 4px;
-}
-
-svg {
-    width: 100%;
-    height: 100%;
-}
-
-.building {
-    fill: #18212b;
-    stroke: #344352;
-    stroke-width: 2;
-}
-
-.building:hover {
-    fill: #202c38;
-}
-
-.road {
-    stroke: #27313b;
-    stroke-width: 25;
-    stroke-linecap: round;
-}
-
-.road-line {
-    stroke: #3b4651;
-    stroke-width: 2;
-    stroke-dasharray: 10 10;
-}
-
-.location-dot {
-    fill: #4da3ff;
-    stroke: #071019;
-    stroke-width: 3;
-    cursor: pointer;
-}
-
-.location-dot.active {
-    fill: #22c55e;
-    r: 11;
-}
-
-.location-label {
-    fill: #d9e2eb;
-    font-size: 13px;
-    pointer-events: none;
-}
-
-.route {
-    stroke: #22c55e;
-    stroke-width: 5;
-    stroke-linecap: round;
-    stroke-dasharray: 12 8;
-    fill: none;
-    display: none;
-}
-
-.legend {
-    position: absolute;
-    right: 25px;
-    bottom: 25px;
-    background: #101720;
-    border: 1px solid #293541;
-    padding: 12px 15px;
-    border-radius: 8px;
-    font-size: 12px;
-}
-
-.legend-item {
-    margin: 5px 0;
-}
-
-.dot-blue {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    background: #4da3ff;
-    border-radius: 50%;
-    margin-right: 6px;
-}
-
-.dot-green {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    background: #22c55e;
-    border-radius: 50%;
-    margin-right: 6px;
-}
-
-@media(max-width: 900px) {
-    .container {
-        grid-template-columns: 1fr;
-        height: auto;
-    }
-
-    .sidebar {
-        border-right: none;
-        border-bottom: 1px solid #222a33;
-    }
-
-    .map-container {
-        height: 600px;
-    }
-}
-
-</style>
-</head>
-
-<body>
-
-<header>
-    <div class="logo">
-        AI <span>Campus Navigator</span>
-    </div>
-
-    <div class="status">
-        ● AI SYSTEM ONLINE
-    </div>
-</header>
-
-<div class="container">
-
-    <aside class="sidebar">
-
-        <div class="title">
-            Where do you want to go?
-        </div>
-
-        <div class="subtitle">
-            Ask the campus AI for directions, rooms,
-            departments, laboratories and facilities.
-        </div>
-
-        <div class="search">
-
-            <input
-                id="query"
-                placeholder="e.g. Where is the computer lab?"
-                onkeydown="handleEnter(event)"
-            >
-
-            <button class="mic" id="micButton" onclick="startVoice()">
-                🎤
-            </button>
-
-            <button class="ask" onclick="askAI()">
-                Ask
-            </button>
-
-        </div>
-
-        <div class="examples">
-
-            <div class="examples-title">
-                Try asking
-            </div>
-
-            <div class="example"
-                 onclick="useExample('Where is the computer lab?')">
-                Where is the computer lab?
-            </div>
-
-            <div class="example"
-                 onclick="useExample('Where is the library?')">
-                Where is the library?
-            </div>
-
-            <div class="example"
-                 onclick="useExample('Where is the principal office?')">
-                Where is the principal office?
-            </div>
-
-            <div class="example"
-                 onclick="useExample('Where is the cafeteria?')">
-                Where is the cafeteria?
-            </div>
-
-            <div class="example"
-                 onclick="useExample('Where is the CS department?')">
-                Where is the CS department?
-            </div>
-
-        </div>
-
-        <div class="response">
-
-            <div class="response-title">
-                AI Response
-            </div>
-
-            <div id="responseText" class="response-text">
-                Ask me where something is on campus.
-            </div>
-
-            <div id="locationCard" class="location-card">
-
-                <div id="locationName" class="location-name"></div>
-
-                <div id="locationInfo" class="location-info"></div>
-
-            </div>
-
-        </div>
-
-    </aside>
-
-
-    <main class="map-container">
-
-        <div class="map-header">
-
-            <div class="map-title">
-                Campus Map
-            </div>
-
-            <div class="map-subtitle">
-                Interactive campus navigation
-            </div>
-
-        </div>
-
-
-        <svg
-            id="map"
-            viewBox="0 0 900 650"
-            preserveAspectRatio="xMidYMid meet"
-        >
-
-            <!-- ROADS -->
-
-            <line
-                class="road"
-                x1="50"
-                y1="350"
-                x2="850"
-                y2="350"
-            />
-
-            <line
-                class="road"
-                x1="500"
-                y1="80"
-                x2="500"
-                y2="600"
-            />
-
-            <line
-                class="road-line"
-                x1="50"
-                y1="350"
-                x2="850"
-                y2="350"
-            />
-
-            <line
-                class="road-line"
-                x1="500"
-                y1="80"
-                x2="500"
-                y2="600"
-            />
-
-
-            <!-- BUILDINGS -->
-
-            <rect
-                class="building"
-                x="45"
-                y="110"
-                width="160"
-                height="120"
-                rx="10"
-            />
-
-            <rect
-                class="building"
-                x="250"
-                y="110"
-                width="150"
-                height="150"
-                rx="10"
-            />
-
-            <rect
-                class="building"
-                x="570"
-                y="100"
-                width="180"
-                height="150"
-                rx="10"
-            />
-
-            <rect
-                class="building"
-                x="350"
-                y="390"
-                width="180"
-                height="120"
-                rx="10"
-            />
-
-            <rect
-                class="building"
-                x="600"
-                y="400"
-                width="180"
-                height="130"
-                rx="10"
-            />
-
-            <rect
-                class="building"
-                x="140"
-                y="470"
-                width="160"
-                height="100"
-                rx="10"
-            />
-
-
-            <!-- BUILDING LABELS -->
-
-            <text
-                x="125"
-                y="170"
-                text-anchor="middle"
-                class="location-label"
-            >
-                PARKING
-            </text>
-
-            <text
-                x="325"
-                y="185"
-                text-anchor="middle"
-                class="location-label"
-            >
-                ADMIN BLOCK
-            </text>
-
-            <text
-                x="660"
-                y="175"
-                text-anchor="middle"
-                class="location-label"
-            >
-                CS BLOCK
-            </text>
-
-            <text
-                x="440"
-                y="455"
-                text-anchor="middle"
-                class="location-label"
-            >
-                ACADEMIC BLOCK
-            </text>
-
-            <text
-                x="690"
-                y="465"
-                text-anchor="middle"
-                class="location-label"
-            >
-                STUDENT CENTER
-            </text>
-
-            <text
-                x="220"
-                y="520"
-                text-anchor="middle"
-                class="location-label"
-            >
-                SCIENCE BLOCK
-            </text>
-
-
-            <!-- ROUTE -->
-
-            <polyline
-                id="route"
-                class="route"
-                points=""
-            />
-
-
-            <!-- LOCATION DOTS -->
-
-            <g id="locations"></g>
-
-        </svg>
-
-
-        <div class="legend">
-
-            <div class="legend-item">
-                <span class="dot-blue"></span>
-                Campus location
-            </div>
-
-            <div class="legend-item">
-                <span class="dot-green"></span>
-                Selected destination
-            </div>
-
-        </div>
-
-    </main>
-
-</div>
-
-
-<script>
-
-const locations = {{ locations | safe }};
-
-const svg = document.getElementById("locations");
-
-function createLocations() {
-
-    Object.entries(locations).forEach(([key, location]) => {
-
-        const circle =
-            document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "circle"
-            );
-
-        circle.setAttribute("cx", location.x);
-        circle.setAttribute("cy", location.y);
-        circle.setAttribute("r", 8);
-        circle.classList.add("location-dot");
-
-        circle.dataset.key = key;
-
-        circle.onclick = () => {
-
-            document.getElementById("query").value =
-                "Where is " + location.name + "?";
-
-            askAI();
-        };
-
-        svg.appendChild(circle);
-
-
-        const text =
-            document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "text"
-            );
-
-        text.setAttribute("x", location.x + 12);
-        text.setAttribute("y", location.y + 5);
-        text.classList.add("location-label");
-        text.textContent = location.name;
-
-        svg.appendChild(text);
-
-    });
-
-}
-
-createLocations();
-
-
-function handleEnter(event) {
-
-    if(event.key === "Enter") {
-        askAI();
-    }
-
-}
-
-
-function useExample(text) {
-
-    document.getElementById("query").value = text;
-
-    askAI();
-
-}
-
-
-async function askAI() {
-
-    const input =
-        document.getElementById("query");
-
-    const query =
-        input.value.trim();
-
-    if(!query) return;
-
-
-    document.getElementById("responseText").innerText =
-        "Thinking...";
-
-
-    const response =
-        await fetch("/ask", {
-
-            method: "POST",
-
-            headers: {
-                "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-                query: query
-            })
-
-        });
-
-
-    const data = await response.json();
-
-
-    if(!data.success) {
-
-        document.getElementById("responseText").innerText =
-            data.message;
-
-        document.getElementById("locationCard").style.display =
-            "none";
-
-        return;
-    }
-
-
-    document.getElementById("responseText").innerText =
-        data.message;
-
-
-    document.getElementById("locationCard").style.display =
-        "block";
-
-
-    document.getElementById("locationName").innerText =
-        data.data.name;
-
-
-    document.getElementById("locationInfo").innerText =
-        data.data.building +
-        " • " +
-        data.data.floor +
-        "\n\n" +
-        data.data.description;
-
-
-    highlightLocation(data.location);
-
-
-    drawRoute(data.location);
-
-
-    speak(data.message);
-
-}
-
-
-function highlightLocation(key) {
-
-    document
-        .querySelectorAll(".location-dot")
-        .forEach(dot => {
-
-            dot.classList.remove("active");
-
-            if(dot.dataset.key === key) {
-
-                dot.classList.add("active");
-
-            }
-
-        });
-
-}
-
-
-function drawRoute(key) {
-
-    const location = locations[key];
-
-    if(!location) return;
-
-    const route =
-        document.getElementById("route");
-
-    const startX = 500;
-    const startY = 350;
-
-    route.setAttribute(
-        "points",
-        `${startX},${startY} ${location.x},${location.y}`
-    );
-
-    route.style.display = "block";
-
-}
-
-
-function speak(text) {
-
-    if(!("speechSynthesis" in window))
-        return;
-
-    window.speechSynthesis.cancel();
-
-    const speech =
-        new SpeechSynthesisUtterance(text);
-
-    speech.rate = 0.95;
-    speech.pitch = 1;
-
-    window.speechSynthesis.speak(speech);
-
-}
-
-
-function startVoice() {
-
-    const SpeechRecognition =
-        window.SpeechRecognition ||
-        window.webkitSpeechRecognition;
-
-    if(!SpeechRecognition) {
-
-        alert(
-            "Speech recognition is not supported by this browser. Try Chrome."
-        );
-
-        return;
-    }
-
-
-    const recognition =
-        new SpeechRecognition();
-
-    recognition.lang = "en-US";
-
-    recognition.interimResults = false;
-
-    recognition.continuous = false;
-
-
-    const button =
-        document.getElementById("micButton");
-
-
-    button.classList.add("active");
-
-    button.innerText = "🔴";
-
-
-    recognition.start();
-
-
-    recognition.onresult = function(event) {
-
-        const text =
-            event.results[0][0].transcript;
-
-        document.getElementById("query").value =
-            text;
-
-        askAI();
-
-    };
-
-
-    recognition.onerror = function() {
-
-        button.classList.remove("active");
-
-        button.innerText = "🎤";
-
-    };
-
-
-    recognition.onend = function() {
-
-        button.classList.remove("active");
-
-        button.innerText = "🎤";
-
-    };
-
-}
-
-</script>
-
-</body>
-</html>
+# ============================================================
+# KUDOS - LOCAL AI VOICE ASSISTANT
+# ============================================================
+#
+# Architecture:
+#
+#   Microphone
+#       ↓
+#   Speech Recognition
+#       ↓
+#   Kudos Assistant
+#       ↓ HTTP
+#   Local AI API
+#       ↓
+#   Ollama
+#       ↓
+#   qwen2.5:1.5b
+#       ↓
+#   Response
+#       ↓
+#   Text To Speech
+#
+# The LLM provider is isolated so it can later be changed
+# from Ollama → College Server → OpenAI-compatible API, etc.
+# ============================================================
+
+import requests
+import pyttsx3
+import speech_recognition as sr
+import webbrowser
+from youtubesearchpython import VideosSearch
+import pygame
+
+from colorama import Fore, Style
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+AI_PROVIDER = "ollama"
+
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+OLLAMA_MODEL = "qwen2.5:1.5b"
+
+# Later you can change this to:
+#
+# AI_PROVIDER = "remote"
+#
+# and point it to your college AI server.
+REMOTE_AI_URL = "http://127.0.0.1:8000/chat"
+
+
+# ============================================================
+# SYSTEM PROMPT
+# ============================================================
+
+SYSTEM_PROMPT = """
+You are Kudos, an AI assistant installed in a college robot.
+
+Your personality:
+- Helpful
+- Intelligent
+- Natural
+- Concise
+- Friendly
+- Professional
+
+Rules:
+- Give direct answers.
+- Do not unnecessarily explain things.
+- Do not use markdown unless necessary.
+- Do not use emojis.
+- Do not mention that you are an AI language model unless asked.
+- Keep normal answers short.
+- If the user explicitly asks for a detailed explanation, provide more detail.
+- Answer naturally as if speaking to a person.
 """
 
 
-@app.route("/")
-def index():
+# ============================================================
+# INITIALIZE AUDIO
+# ============================================================
 
-    import json
+pygame.mixer.init()
 
-    return render_template_string(
-        HTML,
-        locations=json.dumps(LOCATIONS)
+
+# ============================================================
+# TEXT TO SPEECH
+# ============================================================
+
+engine = pyttsx3.init()
+
+voices = engine.getProperty("voices")
+
+if len(voices) > 1:
+    engine.setProperty("voice", voices[1].id)
+
+engine.setProperty("rate", 170)
+engine.setProperty("volume", 1.0)
+
+speaking = False
+
+
+def speak(text):
+    global speaking
+
+    speaking = True
+
+    print(
+        Fore.CYAN +
+        "Kudos: " +
+        text +
+        Style.RESET_ALL
+    )
+
+    engine.say(text)
+    engine.runAndWait()
+
+    speaking = False
+
+
+# ============================================================
+# SPEECH RECOGNITION
+# ============================================================
+
+recognizer = sr.Recognizer()
+
+recognizer.energy_threshold = 300
+recognizer.dynamic_energy_threshold = True
+recognizer.pause_threshold = 0.8
+
+
+# ============================================================
+# AUDIO RESPONSES
+# ============================================================
+
+audio_responses = {
+
+    "how are you":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\thank_you_for_asking.mp3",
+
+    "what is your name":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\I'm_kudos.mp3",
+
+    "how is the weather":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\how_is_the_weather.mp3",
+
+    "who created you":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\made_by.mp3",
+
+    "aapka kya naam hai":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\mera_naam.mp3",
+
+    "pakistan ka matlab kya":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\la_illah.mp3",
+
+    "gilgit baltistan ke bare mein bataen":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\gb.mp3",
+
+    "uswa ke bare mein bataen":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\uswa_barey.mp3",
+
+    "pakistan ke bare mein bataen":
+        r"D:\Work Space\Programming\PYTHON\Project AI\Assistant\AI-PRED\pakistan.mp3"
+}
+
+
+def play_audio(file_path):
+
+    try:
+
+        pygame.mixer.music.load(file_path)
+        pygame.mixer.music.play()
+
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+
+    except Exception as e:
+
+        print(
+            Fore.RED +
+            f"Audio error: {e}" +
+            Style.RESET_ALL
+        )
+
+
+# ============================================================
+# PREDEFINED QUESTIONS
+# ============================================================
+
+def handle_specific_questions(question):
+
+    question_lower = question.lower().strip()
+
+    if question_lower in audio_responses:
+
+        play_audio(audio_responses[question_lower])
+
+        print(
+            Fore.GREEN +
+            f"Playing predefined response for '{question_lower}'" +
+            Style.RESET_ALL
+        )
+
+        return True
+
+    return False
+
+
+# ============================================================
+# WEB FUNCTIONS
+# ============================================================
+
+def open_website(site_name):
+
+    site_name = site_name.strip()
+
+    if not site_name.startswith("http://") and \
+       not site_name.startswith("https://"):
+
+        site_name = site_name.replace(" ", "")
+        site_name = "https://" + site_name + ".com"
+
+    webbrowser.open(site_name)
+
+    return True
+
+
+def search_google(query):
+
+    search_url = (
+        "https://www.google.com/search?q=" +
+        query.replace(" ", "+")
+    )
+
+    webbrowser.open(search_url)
+
+    print(
+        Fore.GREEN +
+        f"Searching Google for {query}" +
+        Style.RESET_ALL
+    )
+
+    speak(f"Searching Google for {query}")
+
+    return True
+
+
+def play_youtube_video(query):
+
+    try:
+
+        videos_search = VideosSearch(
+            query,
+            limit=1
+        )
+
+        result = videos_search.result()
+
+        if not result["result"]:
+            speak("I could not find that video.")
+            return True
+
+        video_url = result["result"][0]["link"]
+
+        print(
+            Fore.GREEN +
+            f"Playing {query}" +
+            Style.RESET_ALL
+        )
+
+        speak(f"Playing {query}")
+
+        webbrowser.open(video_url)
+
+        return True
+
+    except Exception as e:
+
+        print(
+            Fore.RED +
+            f"YouTube error: {e}" +
+            Style.RESET_ALL
+        )
+
+        speak("I could not play that video.")
+
+        return True
+
+
+# ============================================================
+# FEATURE COMMANDS
+# ============================================================
+
+def respond_with_features(voice_data):
+
+    voice_data_lower = voice_data.lower().strip()
+
+
+    # --------------------------------------------------------
+    # Predefined audio responses
+    # --------------------------------------------------------
+
+    if handle_specific_questions(voice_data_lower):
+        return True
+
+
+    # --------------------------------------------------------
+    # Open website
+    # --------------------------------------------------------
+
+    if voice_data_lower.startswith("open "):
+
+        site_name = (
+            voice_data_lower
+            .replace("open ", "", 1)
+            .strip()
+        )
+
+        if open_website(site_name):
+
+            speak(f"Opening {site_name}")
+
+            return True
+
+
+    # --------------------------------------------------------
+    # YouTube
+    # --------------------------------------------------------
+
+    if voice_data_lower.startswith("play "):
+
+        search_query = (
+            voice_data_lower
+            .replace("play ", "", 1)
+            .strip()
+        )
+
+        return play_youtube_video(search_query)
+
+
+    # --------------------------------------------------------
+    # Google search
+    # --------------------------------------------------------
+
+    if voice_data_lower.startswith("search "):
+
+        search_query = (
+            voice_data_lower
+            .replace("search ", "", 1)
+            .strip()
+        )
+
+        return search_google(search_query)
+
+
+    return False
+
+
+# ============================================================
+# LOCAL OLLAMA API
+# ============================================================
+
+def ask_ollama(user_message, conversation):
+
+    payload = {
+
+        "model": OLLAMA_MODEL,
+
+        "messages": conversation,
+
+        "stream": False,
+
+        "options": {
+
+            "temperature": 0.5,
+
+            "top_p": 0.9,
+
+            "num_predict": 300
+        }
+    }
+
+
+    try:
+
+        response = requests.post(
+            OLLAMA_URL,
+            json=payload,
+            timeout=120
+        )
+
+
+        response.raise_for_status()
+
+
+        data = response.json()
+
+
+        message = data["message"]["content"]
+
+
+        return message.strip()
+
+
+    except requests.exceptions.ConnectionError:
+
+        return (
+            "I cannot connect to the local AI server. "
+            "Please make sure Ollama is running."
+        )
+
+
+    except requests.exceptions.Timeout:
+
+        return (
+            "The local AI model is taking too long to respond."
+        )
+
+
+    except Exception as e:
+
+        print(
+            Fore.RED +
+            f"Ollama error: {e}" +
+            Style.RESET_ALL
+        )
+
+        return "I encountered an error while processing your request."
+
+
+# ============================================================
+# FUTURE REMOTE AI API
+# ============================================================
+
+def ask_remote_api(user_message, conversation):
+
+    payload = {
+
+        "message": user_message,
+
+        "conversation": conversation
+    }
+
+
+    try:
+
+        response = requests.post(
+            REMOTE_AI_URL,
+            json=payload,
+            timeout=120
+        )
+
+
+        response.raise_for_status()
+
+
+        data = response.json()
+
+
+        return data["response"].strip()
+
+
+    except requests.exceptions.ConnectionError:
+
+        return "I cannot connect to the college AI server."
+
+
+    except Exception as e:
+
+        print(
+            Fore.RED +
+            f"Remote API error: {e}" +
+            Style.RESET_ALL
+        )
+
+        return "The AI server encountered an error."
+
+
+# ============================================================
+# AI PROVIDER ROUTER
+# ============================================================
+
+def ask_ai(user_message, conversation):
+
+    if AI_PROVIDER == "ollama":
+
+        return ask_ollama(
+            user_message,
+            conversation
+        )
+
+
+    elif AI_PROVIDER == "remote":
+
+        return ask_remote_api(
+            user_message,
+            conversation
+        )
+
+
+    else:
+
+        return "No AI provider has been configured."
+
+
+# ============================================================
+# CONVERSATION MEMORY
+# ============================================================
+
+conversation = [
+
+    {
+        "role": "system",
+        "content": SYSTEM_PROMPT
+    }
+
+]
+
+
+# ============================================================
+# AI RESPONSE
+# ============================================================
+
+def generate_response(question):
+
+    global conversation
+
+
+    # Add user message
+
+    conversation.append({
+
+        "role": "user",
+
+        "content": question
+
+    })
+
+
+    response = ask_ai(
+        question,
+        conversation
     )
 
 
-@app.route("/ask", methods=["POST"])
-def ask():
+    # Add AI response
 
-    data = request.get_json()
+    conversation.append({
 
-    query = data.get("query", "")
+        "role": "assistant",
 
-    result = process_query(query)
+        "content": response
 
-    return jsonify(result)
+    })
 
 
-if __name__ == "__main__":
+    # Prevent unlimited memory growth
+    #
+    # Keep system prompt + last 10 messages.
 
-    print()
-    print("=" * 60)
-    print("        AI CAMPUS NAVIGATOR")
-    print("=" * 60)
-    print()
-    print("Open:")
-    print("http://127.0.0.1:5000")
-    print()
-    print("Press CTRL+C to stop.")
-    print()
+    if len(conversation) > 21:
 
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=True
-    )
+        conversation = [
+            conversation[0]
+        ] + conversation[-20:]
+
+
+    return response
+
+
+# ============================================================
+# CLEAN RESPONSE
+# ============================================================
+
+def clean_response(text):
+
+    text = text.replace("*", "")
+    text = text.replace("#", "")
+    text = text.replace("```", "")
+
+    return text.strip()
+
+
+# ============================================================
+# LISTEN FOR ACTIVATION WORD
+# ============================================================
+
+def listen_for_kudos():
+
+    with sr.Microphone() as source:
+
+        print(
+            Fore.YELLOW +
+            "Waiting for 'Kudos'..." +
+            Style.RESET_ALL
+        )
+
+        recognizer.adjust_for_ambient_noise(
+            source,
+            duration=0.5
+        )
+
+
+        try:
+
+            audio = recognizer.listen(
+                source,
+                timeout=None
+            )
+
+
+            keyword = recognizer.recognize_google(
+                audio
+            )
+
+
+            print(
+                Fore.WHITE +
+                "Heard: " +
+                keyword +
+                Style.RESET_ALL
+            )
+
+
+            if "kudos" in keyword.lower():
+
+                print(
+                    Fore.GREEN +
+                    "'Kudos' detected!" +
+                    Style.RESET_ALL
+                )
+
+                speak(
+                    "Yes, how can I assist you?"
+                )
+
+                handle_conversation()
+
+
+        except sr.UnknownValueError:
+
+            pass
+
+
+        except sr.RequestError as e:
+
+            print(
+                Fore.RED +
+                f"Speech recognition error: {e}" +
+                Style.RESET_ALL
+            )
+
+
+# ============================================================
+# MAIN CONVERSATION
+# ============================================================
+
+def handle_conversation():
+
+    global speaking
+
+
+    while True:
+
+        with sr.Microphone() as source:
+
+            print(
+                Fore.YELLOW +
+                "Listening..." +
+                Style.RESET_ALL
+            )
+
+
+            try:
+
+                audio = recognizer.listen(
+                    source,
+                    timeout=10,
+                    phrase_time_limit=20
+                )
+
+
+                question = recognizer.recognize_google(
+                    audio
+                )
+
+
+                question = question.strip()
+
+
+                print(
+                    Fore.GREEN +
+                    "You: " +
+                    question +
+                    Style.RESET_ALL
+                )
+
+
+                # ------------------------------------------------
+                # Exit
+                # ------------------------------------------------
+
+                if question.lower() in [
+                    "exit",
+                    "goodbye",
+                    "bye",
+                    "quit"
+                ]:
+
+                    speak("Goodbye!")
+
+                    return
+
+
+                # ------------------------------------------------
+                # Stop speaking
+                # ------------------------------------------------
+
+                if (
+                    "stop speaking" in question.lower()
+                    and speaking
+                ):
+
+                    engine.stop()
+
+                    speaking = False
+
+                    return
+
+
+                # ------------------------------------------------
+                # Local feature commands
+                # ------------------------------------------------
+
+                if respond_with_features(question):
+
+                    continue
+
+
+                # ------------------------------------------------
+                # AI
+                # ------------------------------------------------
+
+                print(
+                    Fore.YELLOW +
+                    "Kudos is thinking..." +
+                    Style.RESET_ALL
+                )
+
+
+                response = generate_response(
+                    question
+                )
+
+
+                response = clean_response(
+                    response
+                )
+
+
+                # ------------------------------------------------
+                # Detailed response
+                # ------------------------------------------------
+
+                detailed_keywords = [
+
+                    "detailed",
+
+                    "long",
+
+                    "detail",
+
+                    "explain in detail",
+
+                    "explain fully"
+
+                ]
+
+
+                if any(
+                    keyword in question.lower()
+                    for keyword in detailed_keywords
+                ):
+
+                    speak(response)
+
+
+                else:
+
+                    # Keep normal responses short.
+
+                    sentences = response.split(". ")
+
+                    short_response = sentences[0]
+
+                    if not short_response.endswith("."):
+                        short_response += "."
+
+
+                    speak(short_response)
+
+
+            except sr.UnknownValueError:
+
+                print(
+                    Fore.RED +
+                    "Could not understand audio." +
+                    Style.RESET_ALL
+                )
+
+
+            except sr.RequestError as e:
+
+                print(
+                    Fore.RED +
+                    f"Speech recognition error: {e}" +
+                    Style.RESET_ALL
+                )
+
+
+            except Exception as e:
+
+                print(
+                    Fore.RED +
+                    f"Conversation error: {e}" +
+                    Style.RESET_ALL
+                )
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
+print()
+print("=" * 60)
+
+print(
+    Fore.CYAN +
+    "             KUDOS LOCAL AI" +
+    Style.RESET_ALL
+)
+
+print("=" * 60)
+
+print()
+
+print(
+    Fore.WHITE +
+    "AI Provider : " +
+    Fore.GREEN +
+    AI_PROVIDER +
+    Style.RESET_ALL
+)
+
+print(
+    Fore.WHITE +
+    "Model       : " +
+    Fore.GREEN +
+    OLLAMA_MODEL +
+    Style.RESET_ALL
+)
+
+print(
+    Fore.WHITE +
+    "Ollama API  : " +
+    Fore.GREEN +
+    OLLAMA_URL +
+    Style.RESET_ALL
+)
+
+print()
+
+print(
+    Fore.YELLOW +
+    "Say 'Kudos' to activate the assistant." +
+    Style.RESET_ALL
+)
+
+print(
+    Fore.YELLOW +
+    "Say 'exit' to end a conversation." +
+    Style.RESET_ALL
+)
+
+print()
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+
+while True:
+
+    listen_for_kudos()
