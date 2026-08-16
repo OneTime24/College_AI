@@ -37,7 +37,7 @@ from colorama import Fore, Style
 import json
 import vosk
 import sounddevice as sd
-
+import time
 try:
     from piper import PiperVoice, SynthesisConfig
     PIPER_AVAILABLE = True
@@ -66,14 +66,31 @@ REMOTE_AI_URL = "http://127.0.0.1:8000/chat"
 # ============================================================
 
 VOSK_MODEL_CANDIDATES = [
-    "vosk-model-en-us-0.22",          # Better accuracy if installed
-    "vosk-model-small-en-us-0.15"      # Fast fallback
+    "vosk-model-en-us-0.22",
+    "vosk-model-small-en-us-0.15"
 ]
+
 VOSK_MODEL_PATH = next(
-    (path for path in VOSK_MODEL_CANDIDATES if os.path.isdir(path)),
-    VOSK_MODEL_CANDIDATES[-1]
+    (
+        path
+        for path in VOSK_MODEL_CANDIDATES
+        if os.path.isdir(path)
+    ),
+    None
 )
 
+if VOSK_MODEL_PATH is None:
+    raise FileNotFoundError(
+        "No Vosk model found. "
+        "Place vosk-model-en-us-0.22 or "
+        "vosk-model-small-en-us-0.15 in the project directory."
+    )
+
+print(
+    Fore.GREEN +
+    f"Vosk model: {VOSK_MODEL_PATH}" +
+    Style.RESET_ALL
+)
 # Piper neural TTS voice. Download once, then it works fully offline.
 PIPER_MODEL_PATH = "en_US-amy-medium.onnx"
 PIPER_CONFIG_PATH = "en_US-amy-medium.onnx.json"
@@ -125,27 +142,14 @@ else:
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are Kudos, an AI assistant installed in a college robot.
+You are Kudos, a college robot assistant.
 
-Your personality:
-- Helpful
-- Intelligent
-- Natural
-- Concise
-- Friendly
-- Professional
-
-Rules:
-- Give direct answers.
-- Do not unnecessarily explain things.
-- Do not use markdown unless necessary.
-- Do not use emojis.
-- Do not mention that you are an AI language model unless asked.
-- Keep normal answers short.
-- If the user explicitly asks for a detailed explanation, provide more detail.
-- Answer naturally as if speaking to a person.
+Be helpful, natural, concise and professional.
+Answer normal questions in one or two short sentences.
+Do not use markdown or emojis.
+Do not repeat the user's question.
+Only provide detailed explanations when explicitly requested.
 """
-
 
 # ============================================================
 # INITIALIZE AUDIO
@@ -239,14 +243,15 @@ def speak(text):
 
 recognizer = sr.Recognizer()
 
-# More aggressive voice activity detection.
-recognizer.energy_threshold = 350
-recognizer.dynamic_energy_threshold = True
-recognizer.dynamic_energy_adjustment_damping = 0.15
-recognizer.dynamic_energy_ratio = 1.7
-recognizer.pause_threshold = 0.45
-recognizer.phrase_threshold = 0.2
-recognizer.non_speaking_duration = 0.25
+recognizer.energy_threshold = 400
+
+recognizer.dynamic_energy_threshold = False
+
+recognizer.pause_threshold = 0.65
+
+recognizer.phrase_threshold = 0.25
+
+recognizer.non_speaking_duration = 0.35
 
 
 # ============================================================
@@ -329,6 +334,7 @@ def handle_specific_questions(question):
         return True
 
     return False
+
 
 
 # ============================================================
@@ -496,29 +502,24 @@ def respond_with_features(voice_data):
 # ============================================================
 # LOCAL OLLAMA API
 # ============================================================
-
 def ask_ollama(user_message, conversation):
 
     payload = {
+    "model": OLLAMA_MODEL,
+    "messages": conversation,
+    "stream": False,
+    "keep_alive": -1,
 
-        "model": OLLAMA_MODEL,
-
-        "messages": conversation,
-
-        "stream": False,
-
-        "options": {
-
-            "temperature": 0.5,
-
-            "top_p": 0.9,
-
-            "num_predict": 120
-        }
+    "options": {
+        "temperature": 0.4,
+        "top_p": 0.85,
+        "num_predict": 32,
     }
-
+}
 
     try:
+
+        start_time = time.perf_counter()
 
         response = requests.post(
             OLLAMA_URL,
@@ -526,18 +527,21 @@ def ask_ollama(user_message, conversation):
             timeout=45
         )
 
-
         response.raise_for_status()
-
 
         data = response.json()
 
+        message = data["message"]["content"].strip()
 
-        message = data["message"]["content"]
+        elapsed = time.perf_counter() - start_time
 
+        print(
+            Fore.MAGENTA +
+            f"Ollama response time: {elapsed:.2f}s" +
+            Style.RESET_ALL
+        )
 
-        return message.strip()
-
+        return message
 
     except requests.exceptions.ConnectionError:
 
@@ -546,13 +550,11 @@ def ask_ollama(user_message, conversation):
             "Please make sure Ollama is running."
         )
 
-
     except requests.exceptions.Timeout:
 
         return (
             "The local AI model is taking too long to respond."
         )
-
 
     except Exception as e:
 
@@ -563,7 +565,6 @@ def ask_ollama(user_message, conversation):
         )
 
         return "I encountered an error while processing your request."
-
 
 # ============================================================
 # FUTURE REMOTE AI API
@@ -695,11 +696,11 @@ def generate_response(question):
     #
     # Keep system prompt + last 10 messages.
 
-    if len(conversation) > 21:
+    if len(conversation) > 9:
 
         conversation = [
             conversation[0]
-        ] + conversation[-20:]
+        ] + conversation[-4:]
 
 
     return response
@@ -721,53 +722,83 @@ def clean_response(text):
 # ============================================================
 # LOCAL VOSK SPEECH-TO-TEXT
 # ============================================================
-
 def recognize_vosk(audio, wake_word=False):
-    """Fast local STT. Reuses loaded Vosk recognizers and never calls the internet."""
+
     try:
+
         raw_audio = audio.get_raw_data(
             convert_rate=MIC_SAMPLE_RATE,
             convert_width=2
         )
 
-        stt = wake_vosk_recognizer if wake_word else speech_vosk_recognizer
+        stt = (
+            wake_vosk_recognizer
+            if wake_word
+            else speech_vosk_recognizer
+        )
 
-        # Reset the existing recognizer instead of constructing a new one.
-        try:
-            stt.Reset()
-        except Exception:
-            pass
+        stt.Reset()
 
-        stt.AcceptWaveform(raw_audio)
-        result = json.loads(stt.FinalResult())
-        text = result.get("text", "").strip().lower()
+        # Feed Vosk reasonably sized chunks.
+        chunk_size = 4000
 
-        # Ignore extremely short garbage/noise transcriptions.
-        if len(text) < 2:
+        for start in range(
+            0,
+            len(raw_audio),
+            chunk_size
+        ):
+
+            chunk = raw_audio[
+                start:start + chunk_size
+            ]
+
+            stt.AcceptWaveform(chunk)
+
+        result = json.loads(
+            stt.FinalResult()
+        )
+
+        text = result.get(
+            "text",
+            ""
+        ).strip().lower()
+
+        if not text:
             return ""
 
         return text
 
     except Exception as e:
+
         print(
             Fore.RED +
             f"Vosk error: {e}" +
             Style.RESET_ALL
         )
+
         return ""
-
-
 def calibrate_microphone(source):
-    """Calibrate once at startup instead of before every wake-word attempt."""
-    print(Fore.YELLOW + "Calibrating microphone... stay quiet." + Style.RESET_ALL)
-    recognizer.adjust_for_ambient_noise(source, duration=0.7)
+
     print(
-        Fore.GREEN +
-        f"Microphone ready (threshold={recognizer.energy_threshold:.0f})" +
+        Fore.YELLOW +
+        "Calibrating microphone... stay quiet." +
         Style.RESET_ALL
     )
 
+    recognizer.adjust_for_ambient_noise(
+        source,
+        duration=1.5
+    )
 
+    # Don't let the threshold continuously chase your voice.
+    recognizer.dynamic_energy_threshold = False
+
+    print(
+        Fore.GREEN +
+        f"Microphone ready "
+        f"(threshold={recognizer.energy_threshold:.0f})" +
+        Style.RESET_ALL
+    )
 # ============================================================
 # LISTEN FOR ACTIVATION WORD
 # ============================================================
